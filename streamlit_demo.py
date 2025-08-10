@@ -16,6 +16,7 @@ import numpy as np
 import cv2
 import os
 import io
+import kagglehub
 from typing import Dict, Tuple, List, Optional, Union
 import warnings
 warnings.filterwarnings('ignore')
@@ -310,8 +311,8 @@ class HierarchicalResNet50(nn.Module):
 # ==================== UTILITY FUNCTIONS ====================
 
 @st.cache_resource
-def load_model(model_path=None):
-    """Load the trained DHC model."""
+def load_model():
+    """Load the trained DHC model from Kaggle."""
     try:
         # Create model instance
         model = HierarchicalResNet50(
@@ -320,24 +321,36 @@ def load_model(model_path=None):
             num_classes=[len(MAIN_CATEGORIES), len(DOC_TYPES), len(TEXT_DIRECTIONS)]
         )
         
-        # Try to load pre-trained weights if path provided
-        if model_path and os.path.exists(model_path):
-            checkpoint = torch.load(model_path, map_location='cpu')
-            if 'model_state_dict' in checkpoint:
-                model.load_state_dict(checkpoint['model_state_dict'])
-            else:
-                model.load_state_dict(checkpoint)
+        # Download model from Kaggle
+        with st.spinner("Đang tải mô hình từ Kaggle..."):
             try:
-                print(f"✅ Đã tải mô hình từ: {model_path}")
-            except:
-                print(f"✅ Đã tải mô hình từ: {model_path}")
+                # Download latest version from Kaggle
+                path = kagglehub.model_download("phuchoangnguyen/han-nom-classification/pyTorch/default")
+                
+                # Find the model file in the downloaded path
+                model_files = [f for f in os.listdir(path) if f.endswith('.pth')]
+                if model_files:
+                    model_path = os.path.join(path, model_files[0])
+                    
+                    # Load the model weights
+                    checkpoint = torch.load(model_path, map_location='cpu')
+                    if 'model_state_dict' in checkpoint:
+                        model.load_state_dict(checkpoint['model_state_dict'])
+                    else:
+                        model.load_state_dict(checkpoint)
+                    
+                    st.success(f"✅ Đã tải model thành công")
+                else:
+                    st.warning("⚠️ Không tìm thấy file model trong thư mục tải về. Sử dụng mô hình chưa được huấn luyện.")
+                    
+            except Exception as e:
+                st.error(f"❌ Lỗi khi tải từ Kaggle: {str(e)}")
+                st.warning("⚠️ Sử dụng mô hình chưa được huấn luyện (demo architecture)")
+        
         model.eval()
         return model
     except Exception as e:
-        try:
-            st.error(f"❌ Lỗi khi tải mô hình: {str(e)}")
-        except:
-            print(f"❌ Lỗi khi tải mô hình: {str(e)}")
+        st.error(f"❌ Lỗi khi tải mô hình: {str(e)}")
         return None
 
 def preprocess_image(image):
@@ -482,7 +495,11 @@ def main():
     # Main header
     st.markdown('<h1 class="main-header">🏛️ Hán Nôm Classification Demo</h1>', unsafe_allow_html=True)
     
-    model = load_model('final_hierarchical_model.pth')
+    model = load_model()
+    
+    if model is None:
+        st.error("❌ Không thể tải mô hình. Vui lòng thử lại sau.")
+        st.stop()
     
     st.header("📤 Tải ảnh để phân loại")
         

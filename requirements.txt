@@ -10,3 +10,4 @@ seaborn>=0.11.0
 numpy<2.0.0,>=1.21.0
 pandas>=1.4.0
 tqdm>=4.64.0
+kagglehub>=0.2.0
