@@ -332,8 +332,24 @@ def load_model():
                 if model_files:
                     model_path = os.path.join(path, model_files[0])
                     
-                    # Load the model weights
-                    checkpoint = torch.load(model_path, map_location='cpu')
+                    # Load the model weights with proper error handling
+                    try:
+                        # First try with weights_only=True (safer)
+                        checkpoint = torch.load(model_path, map_location='cpu', weights_only=True)
+                    except Exception as e:
+                        if "WeightsUnpickler error" in str(e) or "weights_only" in str(e):
+                            # Try with safe globals for numpy
+                            try:
+                                import torch.serialization
+                                with torch.serialization.safe_globals([np.core.multiarray.scalar]):
+                                    checkpoint = torch.load(model_path, map_location='cpu', weights_only=True)
+                            except:
+                                # If still fails, use weights_only=False as fallback
+                                # This is safe since we trust the Kaggle source
+                                checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
+                        else:
+                            raise e
+                    
                     if 'model_state_dict' in checkpoint:
                         model.load_state_dict(checkpoint['model_state_dict'])
                     else:
