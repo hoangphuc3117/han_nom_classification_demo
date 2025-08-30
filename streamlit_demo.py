@@ -19,6 +19,7 @@ import io
 import kagglehub
 from typing import Dict, Tuple, List, Optional, Union
 import warnings
+import torchvision.models as models
 warnings.filterwarnings('ignore')
 
 # ==================== CONSTANTS ====================
@@ -131,139 +132,72 @@ class CBAM(nn.Module):
             x_out = self.spatial_attention(x_out)
         return x_out
 
-class Bottleneck(nn.Module):
-    """Bottleneck block cho ResNet50 với CBAM attention."""
-    
+# ==================== BOTTLENECK BLOCK VÀ RESNET50 ====================
+
+class BottleneckCBAM(nn.Module):
     expansion = 4
-    
     def __init__(self, inplanes, planes, stride=1, downsample=None, use_cbam=True):
-        super(Bottleneck, self).__init__()
-        
+        super().__init__()
         self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=1, bias=False)
         self.bn1 = nn.BatchNorm2d(planes)
-        
-        self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=stride,
-                               padding=1, bias=False)
+        self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=stride, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(planes)
-        
         self.conv3 = nn.Conv2d(planes, planes * self.expansion, kernel_size=1, bias=False)
         self.bn3 = nn.BatchNorm2d(planes * self.expansion)
-        
         self.relu = nn.ReLU(inplace=True)
         self.downsample = downsample
         self.stride = stride
-        
-        # CBAM attention
-        if use_cbam:
-            self.cbam = CBAM(planes * self.expansion)
-        else:
-            self.cbam = None
-    
+        self.use_cbam = use_cbam
+        self.cbam = CBAM(planes * self.expansion) if use_cbam else None
     def forward(self, x):
         identity = x
-        
         out = self.conv1(x)
         out = self.bn1(out)
         out = self.relu(out)
-        
         out = self.conv2(out)
         out = self.bn2(out)
         out = self.relu(out)
-        
         out = self.conv3(out)
         out = self.bn3(out)
-        
-        if self.downsample is not None:
-            identity = self.downsample(x)
-        
-        out += identity
-        out = self.relu(out)
-        
-        # Apply CBAM attention
         if self.cbam:
             out = self.cbam(out)
-        
+        if self.downsample is not None:
+            identity = self.downsample(x)
+        out += identity
+        out = self.relu(out)
         return out
 
 class HierarchicalResNet50(nn.Module):
-    """
-    ResNet50 với CBAM và Deep Hierarchical Classification (DHC).
-    """
-    
-    def __init__(self, use_cbam=True, image_depth=3, num_classes=[2, 3, 2]):
-        super(HierarchicalResNet50, self).__init__()
-        
-        self.expansion = 4
-        self.use_cbam = use_cbam
+    def __init__(self, use_cbam=True, image_depth=3, num_classes=[2,3,2]):
+        super().__init__()
         self.inplanes = 64
-        
-        # Initial layers
         self.conv1 = nn.Conv2d(image_depth, 64, kernel_size=7, stride=2, padding=3, bias=False)
         self.bn1 = nn.BatchNorm2d(64)
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        
-        # ResNet layers
-        self.layer1 = self._make_layer(Bottleneck, 64, 3, use_cbam=self.use_cbam)
-        self.layer2 = self._make_layer(Bottleneck, 128, 4, stride=2, use_cbam=self.use_cbam)
-        self.layer3 = self._make_layer(Bottleneck, 256, 6, stride=2, use_cbam=self.use_cbam)
-        self.layer4 = self._make_layer(Bottleneck, 512, 3, stride=2, use_cbam=self.use_cbam)
-        
-        # Global pooling và flatten
+        self.layer1 = self._make_layer(BottleneckCBAM, 64, 3, use_cbam=use_cbam)
+        self.layer2 = self._make_layer(BottleneckCBAM, 128, 4, stride=2, use_cbam=use_cbam)
+        self.layer3 = self._make_layer(BottleneckCBAM, 256, 6, stride=2, use_cbam=use_cbam)
+        self.layer4 = self._make_layer(BottleneckCBAM, 512, 3, stride=2, use_cbam=use_cbam)
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.flatten = nn.Flatten()
-        
-        # DHC hierarchical representation layers
-        base_feature_dim = 512 * self.expansion  # 2048
-        
-        # Level 1: Independent representation (Main category)
-        self.h1_layer = nn.Sequential(
-            nn.Linear(base_feature_dim, 256),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.3)
-        )
-        
-        # Level 2: Include h1 features (Document type)
-        self.h2_layer = nn.Sequential(
-            nn.Linear(base_feature_dim + 256, 128),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.3)
-        )
-        
-        # Level 3: Include h1+h2 features (Text direction)
-        self.h3_layer = nn.Sequential(
-            nn.Linear(base_feature_dim + 256 + 128, 64),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.3)
-        )
-        
-        # Classification heads
-        self.classifier1 = nn.Linear(256, num_classes[0])  # Main category
-        self.classifier2 = nn.Linear(128, num_classes[1])  # Document type
-        self.classifier3 = nn.Linear(64, num_classes[2])   # Text direction
-        
-        # Initialize weights
+        self.fc_main = nn.Linear(2048, num_classes[0])
+        self.fc_doc = nn.Linear(2048, num_classes[1])
+        self.fc_text = nn.Linear(2048, num_classes[2])
         self._initialize_weights()
-    
     def _make_layer(self, block, planes, blocks, stride=1, use_cbam=True):
         downsample = None
         if stride != 1 or self.inplanes != planes * block.expansion:
             downsample = nn.Sequential(
-                nn.Conv2d(self.inplanes, planes * block.expansion,
-                          kernel_size=1, stride=stride, bias=False),
+                nn.Conv2d(self.inplanes, planes * block.expansion, kernel_size=1, stride=stride, bias=False),
                 nn.BatchNorm2d(planes * block.expansion),
             )
-        
         layers = []
         layers.append(block(self.inplanes, planes, stride, downsample, use_cbam=use_cbam))
         self.inplanes = planes * block.expansion
-        for i in range(1, blocks):
+        for _ in range(1, blocks):
             layers.append(block(self.inplanes, planes, use_cbam=use_cbam))
-        
         return nn.Sequential(*layers)
-    
     def _initialize_weights(self):
-        """Initialize model weights."""
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
@@ -273,40 +207,21 @@ class HierarchicalResNet50(nn.Module):
             elif isinstance(m, nn.Linear):
                 nn.init.normal_(m.weight, 0, 0.01)
                 nn.init.constant_(m.bias, 0)
-    
     def forward(self, x):
-        # Base feature extraction
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
         x = self.maxpool(x)
-        
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.layer4(x)
-        
         x = self.avgpool(x)
-        base_features = self.flatten(x)  # [batch, 2048]
-        
-        # DHC hierarchical representation sharing
-        # Level 1: Independent representation
-        h1 = self.h1_layer(base_features)  # [batch, 256]
-        
-        # Level 2: Include h1 representation
-        h2_input = torch.cat([base_features, h1], dim=1)  # [batch, 2048+256]
-        h2 = self.h2_layer(h2_input)  # [batch, 128]
-        
-        # Level 3: Include h1 + h2 representations
-        h3_input = torch.cat([base_features, h1, h2], dim=1)  # [batch, 2048+256+128]
-        h3 = self.h3_layer(h3_input)  # [batch, 64]
-        
-        # Classification outputs
-        level_1 = self.classifier1(h1)  # Main category
-        level_2 = self.classifier2(h2)  # Document type
-        level_3 = self.classifier3(h3)  # Text direction
-        
-        return level_1, level_2, level_3
+        x = torch.flatten(x, 1)
+        out_main = self.fc_main(x)
+        out_doc = self.fc_doc(x)
+        out_text = self.fc_text(x)
+        return [out_main, out_doc, out_text]
 
 # ==================== UTILITY FUNCTIONS ====================
 
@@ -320,6 +235,8 @@ def load_model():
             image_depth=IMAGE_DEPTH,
             num_classes=[len(MAIN_CATEGORIES), len(DOC_TYPES), len(TEXT_DIRECTIONS)]
         )
+
+        load_resnet50_weights_to_custom(model)
         
         # Download model from Kaggle
         with st.spinner("Đang tải mô hình từ Kaggle..."):
@@ -358,6 +275,21 @@ def load_model():
     except Exception as e:
         st.error(f"❌ Lỗi khi tải mô hình: {str(e)}")
         return None
+    
+def load_resnet50_weights_to_custom(model, imagenet_weights=None):
+    """
+    Load pretrained weights từ torchvision ResNet50 vào custom ResNet50 + CBAM.
+    """
+    if imagenet_weights is None:
+        resnet50 = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
+    else:
+        resnet50 = models.resnet50()
+        resnet50.load_state_dict(torch.load(imagenet_weights))
+    model_dict = model.state_dict()
+    pretrained_dict = {k: v for k, v in resnet50.state_dict().items() if k in model_dict and v.size() == model_dict[k].size()}
+    model_dict.update(pretrained_dict)
+    model.load_state_dict(model_dict)
+    print(f"✅ Loaded pretrained weights cho backbone custom ResNet50 + CBAM!")
 
 def preprocess_image(image):
     """Preprocess image for model input."""
