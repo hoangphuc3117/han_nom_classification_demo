@@ -685,16 +685,17 @@ def main():
             
             st.divider()
             
-            # Create video processor
-            if 'video_processor' not in st.session_state:
-                st.session_state.video_processor = VideoProcessor()
-                st.session_state.video_processor.set_model(model)
+            # Factory function to create video processor
+            def video_processor_factory():
+                processor = VideoProcessor()
+                processor.set_model(model)
+                return processor
             
             # WebRTC streamer
             webrtc_ctx = webrtc_streamer(
                 key="han-nom-classifier",
                 mode=WebRtcMode.SENDRECV,
-                video_processor_factory=lambda: st.session_state.video_processor,
+                video_processor_factory=video_processor_factory,
                 media_stream_constraints={"video": True, "audio": False},
                 async_processing=True,
                 rtc_configuration={
@@ -706,8 +707,8 @@ def main():
             if webrtc_ctx.state.playing:
                 st.success("✅ Camera đang hoạt động - Đang phân loại real-time...")
                 
-                # Display current prediction
-                if hasattr(st.session_state.video_processor, 'prediction_text'):
+                # Display current prediction from the active processor
+                if webrtc_ctx.video_processor and hasattr(webrtc_ctx.video_processor, 'prediction_text'):
                     st.markdown(f"""
                     <div style="
                         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -719,7 +720,7 @@ def main():
                         font-weight: bold;
                         margin: 20px 0;
                     ">
-                        🎯 Kết quả hiện tại: {st.session_state.video_processor.prediction_text}
+                        🎯 Kết quả hiện tại: {webrtc_ctx.video_processor.prediction_text}
                     </div>
                     """, unsafe_allow_html=True)
                     
