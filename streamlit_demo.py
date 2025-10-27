@@ -22,6 +22,15 @@ import warnings
 import torchvision.models as models
 warnings.filterwarnings('ignore')
 
+# WebRTC for real-time camera
+try:
+    from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
+    import av
+    WEBRTC_AVAILABLE = True
+except ImportError:
+    WEBRTC_AVAILABLE = False
+    st.warning("⚠️ streamlit-webrtc chưa được cài đặt. Để sử dụng camera real-time, chạy: pip install streamlit-webrtc")
+
 # ==================== CONSTANTS ====================
 MAIN_CATEGORIES = {"SinoNom": 0, "NonSinoNom": 1}
 DOC_TYPES = {"Thong_thuong": 0, "Hanh_chinh": 1, "Ngoai_canh": 2}
@@ -387,6 +396,103 @@ def predict_image(model, image_tensor):
             print(f"❌ Lỗi dự đoán: {str(e)}")
         return None
 
+# ==================== VIDEO PROCESSOR FOR WEBRTC ====================
+
+if WEBRTC_AVAILABLE:
+    class VideoProcessor(VideoProcessorBase):
+        """Video processor for real-time classification"""
+        
+        def __init__(self):
+            self.model = None
+            self.transform = transforms.Compose([
+                transforms.ToPILImage(),
+                transforms.Resize(IMAGE_SIZE),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
+            self.prediction_text = "Đang chờ..."
+            self.frame_count = 0
+            self.process_every_n_frames = 10  # Chỉ xử lý mỗi 10 frames để tăng tốc độ
+        
+        def set_model(self, model):
+            """Set the model for inference"""
+            self.model = model
+        
+        def recv(self, frame):
+            """Process each video frame"""
+            img = frame.to_ndarray(format="bgr24")
+            
+            # Process every N frames
+            self.frame_count += 1
+            if self.frame_count % self.process_every_n_frames == 0 and self.model is not None:
+                try:
+                    # Convert BGR to RGB
+                    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    
+                    # Preprocess
+                    img_tensor = self.transform(img_rgb).unsqueeze(0)
+                    
+                    # Predict
+                    with torch.no_grad():
+                        predictions = self.model(img_tensor)
+                        
+                        # Get probabilities
+                        prob_1 = F.softmax(predictions[0], dim=1)
+                        prob_2 = F.softmax(predictions[1], dim=1)
+                        prob_3 = F.softmax(predictions[2], dim=1)
+                        
+                        # Get predictions
+                        pred_1 = prob_1.argmax(dim=1).item()
+                        pred_2 = prob_2.argmax(dim=1).item()
+                        pred_3 = prob_3.argmax(dim=1).item()
+                        
+                        # Get confidence
+                        conf_1 = prob_1.max().item()
+                        
+                        # Apply hierarchical logic
+                        main_category = INV_MAIN_CATEGORIES[pred_1]
+                        display_main = DISPLAY_MAIN_CATEGORIES.get(main_category, main_category)
+                        
+                        if main_category == "SinoNom":
+                            doc_type = INV_DOC_TYPES[pred_2]
+                            display_doc = DISPLAY_DOC_TYPES.get(doc_type, doc_type)
+                            
+                            if doc_type == "Thong_thuong":
+                                text_direction = INV_TEXT_DIRECTIONS[pred_3]
+                                display_text = DISPLAY_TEXT_DIRECTIONS.get(text_direction, text_direction)
+                                self.prediction_text = f"{display_main} | {display_doc} | {display_text} ({conf_1:.1%})"
+                            else:
+                                self.prediction_text = f"{display_main} | {display_doc} ({conf_1:.1%})"
+                        else:
+                            self.prediction_text = f"{display_main} ({conf_1:.1%})"
+                
+                except Exception as e:
+                    self.prediction_text = f"Lỗi: {str(e)}"
+            
+            # Draw prediction text on frame
+            cv2.putText(
+                img, 
+                self.prediction_text,
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 255, 0),
+                2
+            )
+            
+            # Draw frame count
+            cv2.putText(
+                img,
+                f"Frame: {self.frame_count}",
+                (10, img.shape[0] - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 255),
+                1
+            )
+            
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
+
 # ==================== STREAMLIT APP ====================
 
 def main():
@@ -439,18 +545,27 @@ def main():
         st.error("❌ Không thể tải mô hình. Vui lòng thử lại sau.")
         st.stop()
     
-    st.header("📤 Tải ảnh để phân loại")
-        
-    # File upload
-    uploaded_file = st.file_uploader(
-        "Chọn hình ảnh tài liệu Hán Nôm:",
-        type=['png', 'jpg', 'jpeg', 'tiff', 'bmp'],
-        help="Hỗ trợ các định dạng: PNG, JPG, JPEG, TIFF, BMP"
-    )
+    # Create tabs for different input methods
+    if WEBRTC_AVAILABLE:
+        tab1, tab2 = st.tabs(["📤 Upload Ảnh", "📹 Camera Real-time"])
+    else:
+        tab1 = st.container()
+        tab2 = None
     
-    if uploaded_file is not None:
-        # Display image
-        col1, col2 = st.columns([1, 1])
+    # Tab 1: File Upload
+    with tab1 if WEBRTC_AVAILABLE else tab1:
+        st.header("📤 Tải ảnh để phân loại")
+            
+        # File upload
+        uploaded_file = st.file_uploader(
+            "Chọn hình ảnh tài liệu Hán Nôm:",
+            type=['png', 'jpg', 'jpeg', 'tiff', 'bmp'],
+            help="Hỗ trợ các định dạng: PNG, JPG, JPEG, TIFF, BMP"
+        )
+        
+        if uploaded_file is not None:
+            # Display image
+            col1, col2 = st.columns([1, 1])
         
         with col1:
             st.subheader("🖼️ Ảnh gốc")
@@ -542,6 +657,84 @@ def main():
                         st.error("❌ Không thể thực hiện phân loại")
                 else:
                     st.error("❌ Không thể tiền xử lý ảnh")
+    
+    # Tab 2: Camera Real-time
+    if WEBRTC_AVAILABLE and tab2 is not None:
+        with tab2:
+            st.header("📹 Camera Real-time Classification")
+            st.write("""
+            ### Hướng dẫn sử dụng:
+            1. Nhấn nút **START** để bật camera
+            2. Hướng camera về tài liệu Hán Nôm
+            3. Kết quả phân loại sẽ hiển thị trực tiếp trên video
+            4. Nhấn **STOP** để dừng camera
+            
+            **Lưu ý:** 
+            - Kết quả được cập nhật mỗi 10 frames để đảm bảo hiệu suất
+            - Độ chính xác tốt nhất khi ảnh rõ nét và đủ ánh sáng
+            """)
+            
+            # Info boxes
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.info("💡 **Tip:** Giữ camera ổn định")
+            with col2:
+                st.info("🔆 **Ánh sáng:** Đảm bảo đủ sáng")
+            with col3:
+                st.info("📏 **Khoảng cách:** Không quá xa/gần")
+            
+            st.divider()
+            
+            # Create video processor
+            if 'video_processor' not in st.session_state:
+                st.session_state.video_processor = VideoProcessor()
+                st.session_state.video_processor.set_model(model)
+            
+            # WebRTC streamer
+            webrtc_ctx = webrtc_streamer(
+                key="han-nom-classifier",
+                mode=WebRtcMode.SENDRECV,
+                video_processor_factory=lambda: st.session_state.video_processor,
+                media_stream_constraints={"video": True, "audio": False},
+                async_processing=True,
+                rtc_configuration={
+                    "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+                }
+            )
+            
+            # Display status
+            if webrtc_ctx.state.playing:
+                st.success("✅ Camera đang hoạt động - Đang phân loại real-time...")
+                
+                # Display current prediction
+                if hasattr(st.session_state.video_processor, 'prediction_text'):
+                    st.markdown(f"""
+                    <div style="
+                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                        padding: 20px;
+                        border-radius: 10px;
+                        color: white;
+                        text-align: center;
+                        font-size: 1.2rem;
+                        font-weight: bold;
+                        margin: 20px 0;
+                    ">
+                        🎯 Kết quả hiện tại: {st.session_state.video_processor.prediction_text}
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                # Tips
+                with st.expander("📖 Các mẹo để có kết quả tốt nhất"):
+                    st.write("""
+                    - **Giữ camera ổn định**: Tránh rung lắc để model dễ nhận diện
+                    - **Ánh sáng tốt**: Đảm bảo tài liệu được chiếu sáng đều
+                    - **Khoảng cách phù hợp**: Tài liệu nên chiếm khoảng 70-80% khung hình
+                    - **Góc nhìn thẳng**: Tránh chụp nghiêng quá nhiều
+                    - **Chất lượng ảnh**: Camera có độ phân giải tốt sẽ cho kết quả chính xác hơn
+                    """)
+            else:
+                st.info("ℹ️ Nhấn START để bắt đầu camera")
 
 if __name__ == "__main__":
     main()
+
