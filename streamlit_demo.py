@@ -234,6 +234,13 @@ class HierarchicalResNet50(nn.Module):
 
 # ==================== UTILITY FUNCTIONS ====================
 
+def is_running_on_cloud():
+    """Detect if running on Streamlit Cloud"""
+    # Streamlit Cloud sets HOSTNAME to specific pattern
+    hostname = os.environ.get('HOSTNAME', '')
+    # Check for Streamlit Cloud specific environment variables
+    return 'streamlit' in hostname.lower() or os.environ.get('STREAMLIT_SHARING_MODE') is not None
+
 @st.cache_resource
 def load_model():
     """Load the trained DHC model from Kaggle."""
@@ -677,103 +684,139 @@ def main():
     if WEBRTC_AVAILABLE and tab2 is not None:
         with tab2:
             st.header("📹 Camera Real-time Classification")
-            st.write("""
-            ### Hướng dẫn sử dụng:
-            1. Nhấn nút **START** để bật camera
-            2. Hướng camera về tài liệu Hán Nôm
-            3. Kết quả phân loại sẽ hiển thị trực tiếp trên video
-            4. Nhấn **STOP** để dừng camera
             
-            **Lưu ý:** 
-            - Kết quả được cập nhật mỗi 10 frames để đảm bảo hiệu suất
-            - Độ chính xác tốt nhất khi ảnh rõ nét và đủ ánh sáng
-            """)
+            # Check if running on cloud
+            on_cloud = is_running_on_cloud()
             
-            # Info boxes
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.info("💡 **Tip:** Giữ camera ổn định")
-            with col2:
-                st.info("🔆 **Ánh sáng:** Đảm bảo đủ sáng")
-            with col3:
-                st.info("📏 **Khoảng cách:** Không quá xa/gần")
-            
-            st.divider()
-            
-            # Factory function to create video processor
-            def video_processor_factory():
-                processor = VideoProcessor()
-                processor.set_model(model)
-                return processor
-            
-            # WebRTC configuration with better STUN/TURN servers
-            RTC_CONFIGURATION = {
-                "iceServers": [
-                    {"urls": ["stun:stun.l.google.com:19302"]},
-                    {"urls": ["stun:stun1.l.google.com:19302"]},
-                ]
-            }
-            
-            # WebRTC streamer
-            webrtc_ctx = webrtc_streamer(
-                key="han-nom-classifier",
-                mode=WebRtcMode.SENDRECV,
-                video_processor_factory=video_processor_factory,
-                media_stream_constraints={
-                    "video": {
-                        "width": {"ideal": 1280},
-                        "height": {"ideal": 720},
-                    },
-                    "audio": False
-                },
-                async_processing=True,
-                rtc_configuration=RTC_CONFIGURATION,
-            )
-            
-            # Display connection status
-            st.divider()
-            
-            # Debug information
-            with st.expander("🔍 Thông tin kết nối (Debug)", expanded=False):
-                st.write(f"**Playing:** {webrtc_ctx.state.playing}")
-                st.write(f"**Signalling State:** {webrtc_ctx.state.signalling}")
-                if webrtc_ctx.video_processor:
-                    st.write("✅ Video processor đã được tạo")
-                else:
-                    st.write("❌ Video processor chưa được tạo")
-            
-            # Display status
-            if webrtc_ctx.state.playing:
-                st.success("✅ Camera đang hoạt động - Đang phân loại real-time...")
+            # Important notice about Streamlit Cloud
+            if on_cloud:
+                st.error("""
+                🚫 **Camera Real-time KHÔNG khả dụng trên Streamlit Cloud**
                 
-                # Display current prediction from the active processor
-                if webrtc_ctx.video_processor and hasattr(webrtc_ctx.video_processor, 'prediction_text'):
-                    st.markdown(f"""
-                    <div style="
-                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                        padding: 20px;
-                        border-radius: 10px;
-                        color: white;
-                        text-align: center;
-                        font-size: 1.2rem;
-                        font-weight: bold;
-                        margin: 20px 0;
-                    ">
-                        🎯 Kết quả hiện tại: {webrtc_ctx.video_processor.prediction_text}
-                    </div>
-                    """, unsafe_allow_html=True)
-            else:
-                st.info("ℹ️ Nhấn START để bắt đầu camera")
-            
-            # Tips
-            with st.expander("📖 Các mẹo để có kết quả tốt nhất"):
-                st.write("""
-                - **Giữ camera ổn định**: Tránh rung lắc để model dễ nhận diện
-                - **Ánh sáng tốt**: Đảm bảo tài liệu được chiếu sáng đều
-                - **Khoảng cách phù hợp**: Tài liệu nên chiếm khoảng 70-80% khung hình
-                - **Góc nhìn thẳng**: Tránh chụp nghiêng quá nhiều
-                - **Chất lượng ảnh**: Camera có độ phân giải tốt sẽ cho kết quả chính xác hơn
+                Tính năng này yêu cầu chạy trên máy local do giới hạn về WebRTC và TURN server.
                 """)
+                
+                st.info("""
+                ### 💡 Các lựa chọn thay thế:
+                
+                **1️⃣ Sử dụng Upload Ảnh (Khuyến nghị trên Cloud):**
+                - Chuyển sang tab **"📤 Upload Ảnh"** phía trên
+                - Upload ảnh tài liệu Hán Nôm từ máy/điện thoại
+                - Kết quả phân loại tức thì
+                
+                **2️⃣ Chạy Local + Ngrok (Để dùng Camera):**
+                - Clone repo về máy
+                - Chạy: `streamlit run streamlit_demo.py`
+                - Setup Ngrok để truy cập từ điện thoại
+                - Xem hướng dẫn chi tiết: `RUN_WITH_CAMERA.md`
+                """)
+                
+            else:
+                st.success("""
+                ✅ **Đang chạy Local - Camera có thể hoạt động!**
+                
+                Nếu gặp vấn đề, xem hướng dẫn trong file `RUN_WITH_CAMERA.md`
+                """)
+            
+            # Only show camera interface if running locally
+            if not on_cloud:
+                st.write("""
+                ### Hướng dẫn sử dụng:
+                1. Nhấn nút **START** để bật camera
+                2. Hướng camera về tài liệu Hán Nôm
+                3. Kết quả phân loại sẽ hiển thị trực tiếp trên video
+                4. Nhấn **STOP** để dừng camera
+                
+                **Lưu ý:** 
+                - Kết quả được cập nhật mỗi 10 frames để đảm bảo hiệu suất
+                - Độ chính xác tốt nhất khi ảnh rõ nét và đủ ánh sáng
+                """)
+                
+                # Info boxes
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.info("💡 **Tip:** Giữ camera ổn định")
+                with col2:
+                    st.info("🔆 **Ánh sáng:** Đảm bảo đủ sáng")
+                with col3:
+                    st.info("📏 **Khoảng cách:** Không quá xa/gần")
+                
+                st.divider()
+                
+                # Factory function to create video processor
+                def video_processor_factory():
+                    processor = VideoProcessor()
+                    processor.set_model(model)
+                    return processor
+                
+                # WebRTC configuration with better STUN/TURN servers
+                RTC_CONFIGURATION = {
+                    "iceServers": [
+                        {"urls": ["stun:stun.l.google.com:19302"]},
+                        {"urls": ["stun:stun1.l.google.com:19302"]},
+                    ]
+                }
+                
+                # WebRTC streamer
+                webrtc_ctx = webrtc_streamer(
+                    key="han-nom-classifier",
+                    mode=WebRtcMode.SENDRECV,
+                    video_processor_factory=video_processor_factory,
+                    media_stream_constraints={
+                        "video": {
+                            "width": {"ideal": 1280},
+                            "height": {"ideal": 720},
+                        },
+                        "audio": False
+                    },
+                    async_processing=True,
+                    rtc_configuration=RTC_CONFIGURATION,
+                )
+                
+                # Display connection status
+                st.divider()
+                
+                # Debug information
+                with st.expander("🔍 Thông tin kết nối (Debug)", expanded=False):
+                    st.write(f"**Playing:** {webrtc_ctx.state.playing}")
+                    st.write(f"**Signalling State:** {webrtc_ctx.state.signalling}")
+                    if webrtc_ctx.video_processor:
+                        st.write("✅ Video processor đã được tạo")
+                    else:
+                        st.write("❌ Video processor chưa được tạo")
+                
+                # Display status
+                if webrtc_ctx.state.playing:
+                    st.success("✅ Camera đang hoạt động - Đang phân loại real-time...")
+                    
+                    # Display current prediction from the active processor
+                    if webrtc_ctx.video_processor and hasattr(webrtc_ctx.video_processor, 'prediction_text'):
+                        st.markdown(f"""
+                        <div style="
+                            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                            padding: 20px;
+                            border-radius: 10px;
+                            color: white;
+                            text-align: center;
+                            font-size: 1.2rem;
+                            font-weight: bold;
+                            margin: 20px 0;
+                        ">
+                            🎯 Kết quả hiện tại: {webrtc_ctx.video_processor.prediction_text}
+                        </div>
+                        """, unsafe_allow_html=True)
+                else:
+                    st.info("ℹ️ Nhấn START để bắt đầu camera")
+                
+                # Tips
+                with st.expander("📖 Các mẹo để có kết quả tốt nhất"):
+                    st.write("""
+                    - **Giữ camera ổn định**: Tránh rung lắc để model dễ nhận diện
+                    - **Ánh sáng tốt**: Đảm bảo tài liệu được chiếu sáng đều
+                    - **Khoảng cách phù hợp**: Tài liệu nên chiếm khoảng 70-80% khung hình
+                    - **Góc nhìn thẳng**: Tránh chụp nghiêng quá nhiều
+                    - **Chất lượng ảnh**: Camera có độ phân giải tốt sẽ cho kết quả chính xác hơn
+                    """)
 
 if __name__ == "__main__":
     main()
