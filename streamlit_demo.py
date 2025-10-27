@@ -418,80 +418,95 @@ if WEBRTC_AVAILABLE:
             """Set the model for inference"""
             self.model = model
         
-        def recv(self, frame):
+        def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
             """Process each video frame"""
-            img = frame.to_ndarray(format="bgr24")
-            
-            # Process every N frames
-            self.frame_count += 1
-            if self.frame_count % self.process_every_n_frames == 0 and self.model is not None:
-                try:
-                    # Convert BGR to RGB
-                    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                    
-                    # Preprocess
-                    img_tensor = self.transform(img_rgb).unsqueeze(0)
-                    
-                    # Predict
-                    with torch.no_grad():
-                        predictions = self.model(img_tensor)
-                        
-                        # Get probabilities
-                        prob_1 = F.softmax(predictions[0], dim=1)
-                        prob_2 = F.softmax(predictions[1], dim=1)
-                        prob_3 = F.softmax(predictions[2], dim=1)
-                        
-                        # Get predictions
-                        pred_1 = prob_1.argmax(dim=1).item()
-                        pred_2 = prob_2.argmax(dim=1).item()
-                        pred_3 = prob_3.argmax(dim=1).item()
-                        
-                        # Get confidence
-                        conf_1 = prob_1.max().item()
-                        
-                        # Apply hierarchical logic
-                        main_category = INV_MAIN_CATEGORIES[pred_1]
-                        display_main = DISPLAY_MAIN_CATEGORIES.get(main_category, main_category)
-                        
-                        if main_category == "SinoNom":
-                            doc_type = INV_DOC_TYPES[pred_2]
-                            display_doc = DISPLAY_DOC_TYPES.get(doc_type, doc_type)
-                            
-                            if doc_type == "Thong_thuong":
-                                text_direction = INV_TEXT_DIRECTIONS[pred_3]
-                                display_text = DISPLAY_TEXT_DIRECTIONS.get(text_direction, text_direction)
-                                self.prediction_text = f"{display_main} | {display_doc} | {display_text} ({conf_1:.1%})"
-                            else:
-                                self.prediction_text = f"{display_main} | {display_doc} ({conf_1:.1%})"
-                        else:
-                            self.prediction_text = f"{display_main} ({conf_1:.1%})"
+            try:
+                # Convert frame to numpy array
+                img = frame.to_ndarray(format="bgr24")
                 
-                except Exception as e:
-                    self.prediction_text = f"Lỗi: {str(e)}"
-            
-            # Draw prediction text on frame
-            cv2.putText(
-                img, 
-                self.prediction_text,
-                (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (0, 255, 0),
-                2
-            )
-            
-            # Draw frame count
-            cv2.putText(
-                img,
-                f"Frame: {self.frame_count}",
-                (10, img.shape[0] - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (255, 255, 255),
-                1
-            )
-            
-            return av.VideoFrame.from_ndarray(img, format="bgr24")
+                # Process every N frames
+                self.frame_count += 1
+                if self.frame_count % self.process_every_n_frames == 0 and self.model is not None:
+                    try:
+                        # Convert BGR to RGB
+                        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                        
+                        # Preprocess
+                        img_tensor = self.transform(img_rgb).unsqueeze(0)
+                        
+                        # Predict
+                        with torch.no_grad():
+                            predictions = self.model(img_tensor)
+                            
+                            # Get probabilities
+                            prob_1 = F.softmax(predictions[0], dim=1)
+                            prob_2 = F.softmax(predictions[1], dim=1)
+                            prob_3 = F.softmax(predictions[2], dim=1)
+                            
+                            # Get predictions
+                            pred_1 = prob_1.argmax(dim=1).item()
+                            pred_2 = prob_2.argmax(dim=1).item()
+                            pred_3 = prob_3.argmax(dim=1).item()
+                            
+                            # Get confidence
+                            conf_1 = prob_1.max().item()
+                            
+                            # Apply hierarchical logic
+                            main_category = INV_MAIN_CATEGORIES[pred_1]
+                            display_main = DISPLAY_MAIN_CATEGORIES.get(main_category, main_category)
+                            
+                            if main_category == "SinoNom":
+                                doc_type = INV_DOC_TYPES[pred_2]
+                                display_doc = DISPLAY_DOC_TYPES.get(doc_type, doc_type)
+                                
+                                if doc_type == "Thong_thuong":
+                                    text_direction = INV_TEXT_DIRECTIONS[pred_3]
+                                    display_text = DISPLAY_TEXT_DIRECTIONS.get(text_direction, text_direction)
+                                    self.prediction_text = f"{display_main} | {display_doc} | {display_text} ({conf_1:.1%})"
+                                else:
+                                    self.prediction_text = f"{display_main} | {display_doc} ({conf_1:.1%})"
+                            else:
+                                self.prediction_text = f"{display_main} ({conf_1:.1%})"
+                    
+                    except Exception as e:
+                        self.prediction_text = f"Lỗi: {str(e)[:50]}"
+                
+                # Draw prediction text on frame (with background for better visibility)
+                text = self.prediction_text
+                text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
+                
+                # Draw black background for text
+                cv2.rectangle(img, (5, 5), (text_size[0] + 15, 40), (0, 0, 0), -1)
+                
+                # Draw text
+                cv2.putText(
+                    img, 
+                    text,
+                    (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (0, 255, 0),
+                    2
+                )
+                
+                # Draw frame count
+                cv2.putText(
+                    img,
+                    f"Frame: {self.frame_count}",
+                    (10, img.shape[0] - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 255, 0),
+                    1
+                )
+                
+                # Return the processed frame
+                return av.VideoFrame.from_ndarray(img, format="bgr24")
+                
+            except Exception as e:
+                # If anything fails, just return the original frame
+                print(f"Error in recv: {e}")
+                return frame
 
 # ==================== STREAMLIT APP ====================
 
@@ -691,17 +706,41 @@ def main():
                 processor.set_model(model)
                 return processor
             
+            # WebRTC configuration with better STUN/TURN servers
+            RTC_CONFIGURATION = {
+                "iceServers": [
+                    {"urls": ["stun:stun.l.google.com:19302"]},
+                    {"urls": ["stun:stun1.l.google.com:19302"]},
+                ]
+            }
+            
             # WebRTC streamer
             webrtc_ctx = webrtc_streamer(
                 key="han-nom-classifier",
                 mode=WebRtcMode.SENDRECV,
                 video_processor_factory=video_processor_factory,
-                media_stream_constraints={"video": True, "audio": False},
+                media_stream_constraints={
+                    "video": {
+                        "width": {"ideal": 1280},
+                        "height": {"ideal": 720},
+                    },
+                    "audio": False
+                },
                 async_processing=True,
-                rtc_configuration={
-                    "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
-                }
+                rtc_configuration=RTC_CONFIGURATION,
             )
+            
+            # Display connection status
+            st.divider()
+            
+            # Debug information
+            with st.expander("🔍 Thông tin kết nối (Debug)", expanded=False):
+                st.write(f"**Playing:** {webrtc_ctx.state.playing}")
+                st.write(f"**Signalling State:** {webrtc_ctx.state.signalling}")
+                if webrtc_ctx.video_processor:
+                    st.write("✅ Video processor đã được tạo")
+                else:
+                    st.write("❌ Video processor chưa được tạo")
             
             # Display status
             if webrtc_ctx.state.playing:
@@ -723,18 +762,18 @@ def main():
                         🎯 Kết quả hiện tại: {webrtc_ctx.video_processor.prediction_text}
                     </div>
                     """, unsafe_allow_html=True)
-                    
-                # Tips
-                with st.expander("📖 Các mẹo để có kết quả tốt nhất"):
-                    st.write("""
-                    - **Giữ camera ổn định**: Tránh rung lắc để model dễ nhận diện
-                    - **Ánh sáng tốt**: Đảm bảo tài liệu được chiếu sáng đều
-                    - **Khoảng cách phù hợp**: Tài liệu nên chiếm khoảng 70-80% khung hình
-                    - **Góc nhìn thẳng**: Tránh chụp nghiêng quá nhiều
-                    - **Chất lượng ảnh**: Camera có độ phân giải tốt sẽ cho kết quả chính xác hơn
-                    """)
             else:
                 st.info("ℹ️ Nhấn START để bắt đầu camera")
+            
+            # Tips
+            with st.expander("📖 Các mẹo để có kết quả tốt nhất"):
+                st.write("""
+                - **Giữ camera ổn định**: Tránh rung lắc để model dễ nhận diện
+                - **Ánh sáng tốt**: Đảm bảo tài liệu được chiếu sáng đều
+                - **Khoảng cách phù hợp**: Tài liệu nên chiếm khoảng 70-80% khung hình
+                - **Góc nhìn thẳng**: Tránh chụp nghiêng quá nhiều
+                - **Chất lượng ảnh**: Camera có độ phân giải tốt sẽ cho kết quả chính xác hơn
+                """)
 
 if __name__ == "__main__":
     main()
