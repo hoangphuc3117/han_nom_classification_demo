@@ -566,97 +566,97 @@ def main():
         if uploaded_file is not None:
             # Display image
             col1, col2 = st.columns([1, 1])
-        
-        with col1:
-            st.subheader("🖼️ Ảnh gốc")
-            image = Image.open(uploaded_file)
-            st.image(image, caption=f"File: {uploaded_file.name}", use_container_width=False)
             
-            # Image info
-            st.write(f"**Kích thước:** {image.size}")
-            st.write(f"**Định dạng:** {image.format}")
-            st.write(f"**Mode:** {image.mode}")
-        
-        with col2:
-            st.subheader("🧠 Kết quả phân loại")
-            
-            # Automatic prediction when image is uploaded
-            with st.spinner("Đang phân tích..."):
-                # Preprocess image
-                image_tensor = preprocess_image(image)
+            with col1:
+                st.subheader("🖼️ Ảnh gốc")
+                image = Image.open(uploaded_file)
+                st.image(image, caption=f"File: {uploaded_file.name}", use_container_width=False)
                 
-                if image_tensor is not None:
-                    # Make prediction
-                    prediction = predict_image(model, image_tensor)
+                # Image info
+                st.write(f"**Kích thước:** {image.size}")
+                st.write(f"**Định dạng:** {image.format}")
+                st.write(f"**Mode:** {image.mode}")
+            
+            with col2:
+                st.subheader("🧠 Kết quả phân loại")
+                
+                # Automatic prediction when image is uploaded
+                with st.spinner("Đang phân tích..."):
+                    # Preprocess image
+                    image_tensor = preprocess_image(image)
                     
-                    if prediction:    
-                        # Main Category
-                        with st.container():
-                            col_a, col_b = st.columns([3, 1])
-                            with col_a:
-                                st.metric(
-                                    label="📊 Loại chính",
-                                    value=prediction['main_category'],
-                                    delta=f"Độ tin cậy: {prediction['main_category_confidence']:.1%}"
-                                )
-                            with col_b:
-                                st.progress(prediction['main_category_confidence'])
+                    if image_tensor is not None:
+                        # Make prediction
+                        prediction = predict_image(model, image_tensor)
                         
-                        # Document Type  
-                        with st.container():
-                            col_a, col_b = st.columns([3, 1])
-                            with col_a:
-                                st.metric(
-                                    label="📋 Loại tài liệu",
-                                    value=prediction['document_type'],
-                                    delta=f"Độ tin cậy: {prediction['document_type_confidence']:.1%}" if prediction['document_type'] != "N/A" else "Không áp dụng"
-                                )
-                            with col_b:
-                                if prediction['document_type'] != "N/A":
-                                    st.progress(prediction['document_type_confidence'])
-                                else:
-                                    st.write("—")
-                        
-                        # Text Direction
-                        with st.container():
-                            col_a, col_b = st.columns([3, 1])
-                            with col_a:
-                                st.metric(
-                                    label="📐 Hướng đọc",
-                                    value=prediction['text_direction'],
-                                    delta=f"Độ tin cậy: {prediction['text_direction_confidence']:.1%}" if prediction['text_direction'] != "N/A" else "Không áp dụng"
-                                )
-                            with col_b:
-                                if prediction['text_direction'] != "N/A":
-                                    st.progress(prediction['text_direction_confidence'])
-                                else:
-                                    st.write("—")
-                        
-                        # Detailed probabilities
-                        with st.expander("📈 Chi tiết xác suất"):
-                            probs = prediction['raw_probabilities']
+                        if prediction:    
+                            # Main Category
+                            with st.container():
+                                col_a, col_b = st.columns([3, 1])
+                                with col_a:
+                                    st.metric(
+                                        label="📊 Loại chính",
+                                        value=prediction['main_category'],
+                                        delta=f"Độ tin cậy: {prediction['main_category_confidence']:.1%}"
+                                    )
+                                with col_b:
+                                    st.progress(prediction['main_category_confidence'])
                             
-                            # Level 1
-                            st.write("**Loại chính:**")
-                            for i, (name, prob) in enumerate(zip(MAIN_CATEGORIES.keys(), probs['level_1'])):
-                                display_name = DISPLAY_MAIN_CATEGORIES.get(name, name)
-                                st.write(f"- {display_name}: {prob:.3f}")
+                            # Document Type  
+                            with st.container():
+                                col_a, col_b = st.columns([3, 1])
+                                with col_a:
+                                    st.metric(
+                                        label="📋 Loại tài liệu",
+                                        value=prediction['document_type'],
+                                        delta=f"Độ tin cậy: {prediction['document_type_confidence']:.1%}" if prediction['document_type'] != "N/A" else "Không áp dụng"
+                                    )
+                                with col_b:
+                                    if prediction['document_type'] != "N/A":
+                                        st.progress(prediction['document_type_confidence'])
+                                    else:
+                                        st.write("—")
                             
-                            # Level 2
-                            st.write("**Loại tài liệu:**")
-                            for i, (name, prob) in enumerate(zip(DOC_TYPES.keys(), probs['level_2'])):
-                                display_name = DISPLAY_DOC_TYPES.get(name, name)
-                                st.write(f"- {display_name}: {prob:.3f}")
+                            # Text Direction
+                            with st.container():
+                                col_a, col_b = st.columns([3, 1])
+                                with col_a:
+                                    st.metric(
+                                        label="📐 Hướng đọc",
+                                        value=prediction['text_direction'],
+                                        delta=f"Độ tin cậy: {prediction['text_direction_confidence']:.1%}" if prediction['text_direction'] != "N/A" else "Không áp dụng"
+                                    )
+                                with col_b:
+                                    if prediction['text_direction'] != "N/A":
+                                        st.progress(prediction['text_direction_confidence'])
+                                    else:
+                                        st.write("—")
                             
-                            # Level 3
-                            st.write("**Hướng đọc:**")
-                            for i, (name, prob) in enumerate(zip(TEXT_DIRECTIONS.keys(), probs['level_3'])):
-                                display_name = DISPLAY_TEXT_DIRECTIONS.get(name, name)
-                                st.write(f"- {display_name}: {prob:.3f}")
+                            # Detailed probabilities
+                            with st.expander("📈 Chi tiết xác suất"):
+                                probs = prediction['raw_probabilities']
+                                
+                                # Level 1
+                                st.write("**Loại chính:**")
+                                for i, (name, prob) in enumerate(zip(MAIN_CATEGORIES.keys(), probs['level_1'])):
+                                    display_name = DISPLAY_MAIN_CATEGORIES.get(name, name)
+                                    st.write(f"- {display_name}: {prob:.3f}")
+                                
+                                # Level 2
+                                st.write("**Loại tài liệu:**")
+                                for i, (name, prob) in enumerate(zip(DOC_TYPES.keys(), probs['level_2'])):
+                                    display_name = DISPLAY_DOC_TYPES.get(name, name)
+                                    st.write(f"- {display_name}: {prob:.3f}")
+                                
+                                # Level 3
+                                st.write("**Hướng đọc:**")
+                                for i, (name, prob) in enumerate(zip(TEXT_DIRECTIONS.keys(), probs['level_3'])):
+                                    display_name = DISPLAY_TEXT_DIRECTIONS.get(name, name)
+                                    st.write(f"- {display_name}: {prob:.3f}")
+                        else:
+                            st.error("❌ Không thể thực hiện phân loại")
                     else:
-                        st.error("❌ Không thể thực hiện phân loại")
-                else:
-                    st.error("❌ Không thể tiền xử lý ảnh")
+                        st.error("❌ Không thể tiền xử lý ảnh")
     
     # Tab 2: Camera Real-time
     if WEBRTC_AVAILABLE and tab2 is not None:
