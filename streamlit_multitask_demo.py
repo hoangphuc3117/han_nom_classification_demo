@@ -1,19 +1,21 @@
-"""
-🏛️ Hán Nôm Multi-Task Classification Demo
-Streamlit Web Application for Multi-Task Learning
+""" 
+🏛️ Hán Nôm Hierarchical Classification Demo
+Streamlit Web Application for Hierarchical Classification
 
 ✅ UPDATED: Architecture matches training notebook!
 
-This app demonstrates the HierarchicalResNet50WithRotation model with CBAM for:
-- Deep Hierarchical document classification (3 levels with feature concatenation)
-- Rotation angle prediction (4 angles: 0°, 90°, 180°, 270°) - Only for SinoNom
+This app demonstrates the HierarchicalResNet50 model with CBAM for:
+- Deep Hierarchical document classification (4 levels with feature concatenation)
+- Level 1: Main category (SinoNom/NonSinoNom)
+- Level 2: Document type (Thong_thuong/Hanh_chinh/Ngoai_canh)
+- Level 3_1: Text direction (Doc/Ngang) - Only for Thong_thuong
+- Level 3_2: Ngoai canh type (Bia/Other) - Only for Ngoai_canh
 
-Model: HierarchicalResNet50WithRotation
+Model: HierarchicalResNet50
 - Backbone: ResNet50 + CBAM attention
 - Image size: 128x128
-- Training: Conditional model with data augmentation x4
+- Training: 4-output hierarchical model
 """
-
 import streamlit as st
 import torch
 import torch.nn as nn
@@ -34,13 +36,13 @@ warnings.filterwarnings('ignore')
 MAIN_CATEGORIES = {"SinoNom": 0, "NonSinoNom": 1}
 DOC_TYPES = {"Thong_thuong": 0, "Hanh_chinh": 1, "Ngoai_canh": 2}
 TEXT_DIRECTIONS = {"Doc": 0, "Ngang": 1}
-ROTATION_ANGLES = {0: 0, 90: 1, 180: 2, 270: 3}
+NGOAI_CANH_TYPES = {"Bia": 0, "Other": 1}
 
 # Reverse mappings for inference
 INV_MAIN_CATEGORIES = {v: k for k, v in MAIN_CATEGORIES.items()}
 INV_DOC_TYPES = {v: k for k, v in DOC_TYPES.items()}
 INV_TEXT_DIRECTIONS = {v: k for k, v in TEXT_DIRECTIONS.items()}
-INV_ROTATION_ANGLES = {v: k for k, v in ROTATION_ANGLES.items()}
+INV_NGOAI_CANH_TYPES = {v: k for k, v in NGOAI_CANH_TYPES.items()}
 
 # Display mappings for Vietnamese text
 DISPLAY_MAIN_CATEGORIES = {
@@ -57,6 +59,11 @@ DISPLAY_DOC_TYPES = {
 DISPLAY_TEXT_DIRECTIONS = {
     "Doc": "Dọc",
     "Ngang": "Ngang"
+}
+
+DISPLAY_NGOAI_CANH_TYPES = {
+    "Bia": "Bia",
+    "Other": "Khác"
 }
 
 IMAGE_SIZE = (128, 128)  # ✅ UPDATED: 128x128 for conditional model (matches training)
@@ -186,23 +193,20 @@ class BottleneckCBAM(nn.Module):
         return out
 
 
-class HierarchicalResNet50WithRotation(nn.Module):
+class HierarchicalResNet50(nn.Module):
     """
-    ResNet50 with CBAM + Deep Hierarchical Classification + Rotation Detection.
+    ResNet50 with CBAM + Deep Hierarchical Classification
     ✅ UPDATED: Architecture matches training notebook exactly!
     
     Multi-task learning:
     - Shared backbone for feature extraction
-    - Hierarchical classification head (3 levels with feature concatenation)
-    - Rotation detection head (4 classes: 0°, 90°, 180°, 270°)
+    - Hierarchical classification head (4 outputs: main category, doc type, text direction, ngoai_canh type)
     """
     
-    def __init__(self, use_cbam=True, image_depth=3, num_classes=[2, 3, 2],
-                 enable_rotation=True, num_rotation_classes=4):
+    def __init__(self, use_cbam=True, image_depth=3, num_classes=[2, 3, 2, 2]):
         super().__init__()
         self.expansion = 4
         self.use_cbam = use_cbam
-        self.enable_rotation = enable_rotation
         self.inplanes = 64
         
         # ==================== SHARED BACKBONE ====================
@@ -237,32 +241,27 @@ class HierarchicalResNet50WithRotation(nn.Module):
             nn.Dropout(0.4)
         )
         
-        # Level 3: Text direction (depends on h1 + h2)
-        self.h3_layer = nn.Sequential(
+        # Level 3_thong_thuong: Text direction (depends on h1 + h2)
+        self.h3_1_layer = nn.Sequential(
             nn.Linear(base_feature_dim + 512 + 256, 128),
             nn.BatchNorm1d(128),
             nn.ReLU(inplace=True),
             nn.Dropout(0.3)
         )
-        
+
+        # Level 3_ngoai_canh: Ngoai canh type (depends on h1 + h2) 
+        self.h3_2_layer = nn.Sequential(
+            nn.Linear(base_feature_dim + 512 + 256, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3)
+        )
+
         # Classification heads
         self.classifier1 = nn.Linear(512, num_classes[0])  # Main category
         self.classifier2 = nn.Linear(256, num_classes[1])  # Document type
-        self.classifier3 = nn.Linear(128, num_classes[2])  # Text direction
-        
-        # ==================== ROTATION DETECTION HEAD ====================
-        if self.enable_rotation:
-            self.rotation_head = nn.Sequential(
-                nn.Linear(base_feature_dim, 512),
-                nn.BatchNorm1d(512),
-                nn.ReLU(inplace=True),
-                nn.Dropout(0.5),
-                nn.Linear(512, 256),
-                nn.BatchNorm1d(256),
-                nn.ReLU(inplace=True),
-                nn.Dropout(0.3),
-                nn.Linear(256, num_rotation_classes)
-            )
+        self.classifier3_1 = nn.Linear(128, num_classes[2])  # Text direction
+        self.classifier3_2 = nn.Linear(128, num_classes[3])  # Ngoai canh type
         
         self._initialize_weights()
     
@@ -318,17 +317,13 @@ class HierarchicalResNet50WithRotation(nn.Module):
         h2 = self.h2_layer(h2_input)  # [batch, 256]
         out_doc = self.classifier2(h2)
         
-        # Level 3
+        # Level 3 (Text direction and Ngoai canh type)
         h3_input = torch.cat([base_features, h1, h2], dim=1)
-        h3 = self.h3_layer(h3_input)  # [batch, 128]
-        out_text = self.classifier3(h3)
+        h3 = self.h3_1_layer(h3_input)  # [batch, 128]
+        out_text = self.classifier3_1(h3)
+        out_ngoai_canh = self.classifier3_2(h3)
         
-        # ==================== ROTATION DETECTION ====================
-        if self.enable_rotation:
-            out_rotation = self.rotation_head(base_features)
-            return [out_main, out_doc, out_text], out_rotation
-        else:
-            return [out_main, out_doc, out_text]
+        return [out_main, out_doc, out_text, out_ngoai_canh]
 
 # ==================== UTILITY FUNCTIONS ====================
 
@@ -336,22 +331,20 @@ class HierarchicalResNet50WithRotation(nn.Module):
 def load_model():
     """Load the trained Multi-Task model from Kaggle."""
     try:
-        # Create model instance - UPDATED to use HierarchicalResNet50WithRotation
-        model = HierarchicalResNet50WithRotation(
+        # Create model instance - UPDATED to use HierarchicalResNet50
+        model = HierarchicalResNet50(
             use_cbam=True,
             image_depth=IMAGE_DEPTH,
-            num_classes=[len(MAIN_CATEGORIES), len(DOC_TYPES), len(TEXT_DIRECTIONS)],
-            enable_rotation=True,
-            num_rotation_classes=len(ROTATION_ANGLES)
+            num_classes=[len(MAIN_CATEGORIES), len(DOC_TYPES), len(TEXT_DIRECTIONS), len(NGOAI_CANH_TYPES)]
         )
 
         load_resnet50_weights_to_custom(model)
         
         # Download model from Kaggle
-        with st.spinner("Đang tải mô hình Multi-Task từ Kaggle..."):
+        with st.spinner("Đang tải mô hình từ Kaggle..."):
             try:
                 # Download latest version from Kaggle
-                path = kagglehub.model_download("phuchoangnguyen/han-nom-classificatiion-multi-task/pyTorch/default")
+                path = kagglehub.model_download("phuchoangnguyen/han-nom-classification/pyTorch/default")
                 
                 # Find the model file in the downloaded path
                 model_files = [f for f in os.listdir(path) if f.endswith('.pth')]
@@ -440,29 +433,29 @@ def predict_image(model, image_tensor):
     """Make prediction on preprocessed image with multi-task model."""
     try:
         with torch.no_grad():
-            # Model returns tuple: (hierarchical_outputs, rotation_output)
-            hierarchical_outputs, rotation_output = model(image_tensor)
+            # Model returns list of 4 outputs
+            hierarchical_outputs = model(image_tensor)
             
             # Unpack hierarchical outputs
-            out_main, out_doc, out_text = hierarchical_outputs
+            out_main, out_doc, out_text, out_ngoai_canh = hierarchical_outputs
             
             # Convert to probabilities
             prob_1 = F.softmax(out_main, dim=1)
             prob_2 = F.softmax(out_doc, dim=1)
             prob_3 = F.softmax(out_text, dim=1)
-            prob_rotation = F.softmax(rotation_output, dim=1)
+            prob_4 = F.softmax(out_ngoai_canh, dim=1)
             
             # Get predicted classes
             pred_1 = prob_1.argmax(dim=1).item()
             pred_2 = prob_2.argmax(dim=1).item()
             pred_3 = prob_3.argmax(dim=1).item()
-            pred_rotation = prob_rotation.argmax(dim=1).item()
+            pred_4 = prob_4.argmax(dim=1).item()
             
             # Get confidence scores
             conf_1 = prob_1.max().item()
             conf_2 = prob_2.max().item()
             conf_3 = prob_3.max().item()
-            conf_rotation = prob_rotation.max().item()
+            conf_4 = prob_4.max().item()
             
             # Apply hierarchical logic
             main_category = INV_MAIN_CATEGORIES[pred_1]
@@ -471,22 +464,30 @@ def predict_image(model, image_tensor):
                 doc_type = INV_DOC_TYPES[pred_2]
                 if doc_type == "Thong_thuong":
                     text_direction = INV_TEXT_DIRECTIONS[pred_3]
-                else:
+                    ngoai_canh_type = "N/A"
+                    conf_4 = 0.0
+                elif doc_type == "Ngoai_canh":
                     text_direction = "N/A"
+                    ngoai_canh_type = INV_NGOAI_CANH_TYPES[pred_4]
                     conf_3 = 0.0
+                else:  # Hanh_chinh
+                    text_direction = "N/A"
+                    ngoai_canh_type = "N/A"
+                    conf_3 = 0.0
+                    conf_4 = 0.0
             else:
                 doc_type = "N/A"
                 text_direction = "N/A"
+                ngoai_canh_type = "N/A"
                 conf_2 = 0.0
                 conf_3 = 0.0
-            
-            # Get rotation angle
-            rotation_angle = INV_ROTATION_ANGLES[pred_rotation]
+                conf_4 = 0.0
             
             # Convert to display names
             display_main_category = DISPLAY_MAIN_CATEGORIES.get(main_category, main_category)
             display_doc_type = DISPLAY_DOC_TYPES.get(doc_type, doc_type) if doc_type != "N/A" else "N/A"
             display_text_direction = DISPLAY_TEXT_DIRECTIONS.get(text_direction, text_direction) if text_direction != "N/A" else "N/A"
+            display_ngoai_canh_type = DISPLAY_NGOAI_CANH_TYPES.get(ngoai_canh_type, ngoai_canh_type) if ngoai_canh_type != "N/A" else "N/A"
             
             return {
                 'main_category': display_main_category,
@@ -495,37 +496,27 @@ def predict_image(model, image_tensor):
                 'document_type_confidence': conf_2,
                 'text_direction': display_text_direction,
                 'text_direction_confidence': conf_3,
-                'rotation_angle': rotation_angle,
-                'rotation_confidence': conf_rotation,
+                'ngoai_canh_type': display_ngoai_canh_type,
+                'ngoai_canh_confidence': conf_4,
                 'raw_probabilities': {
                     'level_1': prob_1.squeeze().tolist(),
                     'level_2': prob_2.squeeze().tolist(),
-                    'level_3': prob_3.squeeze().tolist(),
-                    'rotation': prob_rotation.squeeze().tolist()
+                    'level_3_1': prob_3.squeeze().tolist(),
+                    'level_3_2': prob_4.squeeze().tolist()
                 }
             }
     except Exception as e:
         st.error(f"❌ Lỗi dự đoán: {str(e)}")
         return None
 
-def rotate_image(image, angle):
-    """Rotate image by specified angle."""
-    if angle == 0:
-        return image
-    elif angle == 90:
-        return image.rotate(-90, expand=True)
-    elif angle == 180:
-        return image.rotate(180, expand=True)
-    elif angle == 270:
-        return image.rotate(90, expand=True)
-    return image
+
 
 # ==================== STREAMLIT APP ====================
 
 def main():
     # Page config
     st.set_page_config(
-        page_title="Hán Nôm Multi-Task Classification Demo",
+        page_title="Hán Nôm Hierarchical Classification Demo",
         page_icon="🏛️",
         layout="wide",
         initial_sidebar_state="expanded"
@@ -574,14 +565,14 @@ def main():
     """, unsafe_allow_html=True)
     
     # Main header
-    st.markdown('<h1 class="main-header">🏛️ Hán Nôm Multi-Task Classification Demo</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">🏛️ Hán Nôm Hierarchical Classification Demo</h1>', unsafe_allow_html=True)
     
     # Description
     st.markdown("""
     ### 🎯 Giới thiệu
-    Ứng dụng này sử dụng mô hình **Multi-Task ResNet50 với CBAM** để thực hiện:
+    Ứng dụng này sử dụng mô hình **Hierarchical ResNet50 với CBAM** để thực hiện:
     - **Phân loại phân cấp** (Hierarchical Classification): Xác định loại tài liệu Hán Nôm
-    - **Dự đoán góc xoay** (Rotation Prediction): Xác định góc xoay của ảnh (0°, 90°, 180°, 270°)
+    - **4 cấp độ**: Loại chính → Loại tài liệu → Hướng đọc (Thông thường) / Loại ngoại cảnh (Ngoại cảnh)
     """)
     
     st.divider()
@@ -628,12 +619,6 @@ def main():
                     prediction = predict_image(model, image_tensor)
                     
                     if prediction:
-                        # Rotation Prediction (highlighted section)
-                        st.markdown(
-                            f'<div class="rotation-indicator">🔄 Góc xoay phát hiện: {prediction["rotation_angle"]}° (Độ tin cậy: {prediction["rotation_confidence"]:.1%})</div>',
-                            unsafe_allow_html=True
-                        )
-                        
                         # Main Category
                         with st.container():
                             col_a, col_b = st.columns([3, 1])
@@ -666,7 +651,7 @@ def main():
                             col_a, col_b = st.columns([3, 1])
                             with col_a:
                                 st.metric(
-                                    label="📐 Hướng đọc",
+                                    label="📐 Hướng đọc (Thông thường)",
                                     value=prediction['text_direction'],
                                     delta=f"Độ tin cậy: {prediction['text_direction_confidence']:.1%}" if prediction['text_direction'] != "N/A" else "Không áp dụng"
                                 )
@@ -676,12 +661,20 @@ def main():
                                 else:
                                     st.write("—")
                         
-                        # Show corrected image if rotation detected
-                        if prediction['rotation_angle'] != 0:
-                            st.divider()
-                            st.subheader("✨ Ảnh đã được chỉnh góc")
-                            corrected_image = rotate_image(image, prediction['rotation_angle'])
-                            st.image(corrected_image, caption=f"Đã xoay {prediction['rotation_angle']}°", use_container_width=True)
+                        # Ngoai Canh Type
+                        with st.container():
+                            col_a, col_b = st.columns([3, 1])
+                            with col_a:
+                                st.metric(
+                                    label="🏛️ Loại ngoại cảnh",
+                                    value=prediction['ngoai_canh_type'],
+                                    delta=f"Độ tin cậy: {prediction['ngoai_canh_confidence']:.1%}" if prediction['ngoai_canh_type'] != "N/A" else "Không áp dụng"
+                                )
+                            with col_b:
+                                if prediction['ngoai_canh_type'] != "N/A":
+                                    st.progress(prediction['ngoai_canh_confidence'])
+                                else:
+                                    st.write("—")
                         
                         # Detailed probabilities
                         with st.expander("📈 Chi tiết xác suất"):
@@ -699,16 +692,17 @@ def main():
                                 display_name = DISPLAY_DOC_TYPES.get(name, name)
                                 st.write(f"- {display_name}: {prob:.3f}")
                             
-                            # Level 3
-                            st.write("**Hướng đọc:**")
-                            for i, (name, prob) in enumerate(zip(TEXT_DIRECTIONS.keys(), probs['level_3'])):
+                            # Level 3_1
+                            st.write("**Hướng đọc (Thông thường):**")
+                            for i, (name, prob) in enumerate(zip(TEXT_DIRECTIONS.keys(), probs['level_3_1'])):
                                 display_name = DISPLAY_TEXT_DIRECTIONS.get(name, name)
                                 st.write(f"- {display_name}: {prob:.3f}")
                             
-                            # Rotation
-                            st.write("**Góc xoay:**")
-                            for i, (angle, prob) in enumerate(zip(ROTATION_ANGLES.keys(), probs['rotation'])):
-                                st.write(f"- {angle}°: {prob:.3f}")
+                            # Level 3_2
+                            st.write("**Loại ngoại cảnh:**")
+                            for i, (name, prob) in enumerate(zip(NGOAI_CANH_TYPES.keys(), probs['level_3_2'])):
+                                display_name = DISPLAY_NGOAI_CANH_TYPES.get(name, name)
+                                st.write(f"- {display_name}: {prob:.3f}")
                     else:
                         st.error("❌ Không thể thực hiện phân loại")
                 else:
@@ -718,13 +712,15 @@ def main():
     with st.sidebar:
         st.header("ℹ️ Thông tin mô hình")
         st.write("""
-        **Kiến trúc:** Multi-Task ResNet50 + CBAM
+        **Kiến trúc:** Hierarchical ResNet50 + CBAM
         
-        **Kích thước ảnh:** 224x224
+        **Kích thước ảnh:** 128x128
         
-        **Tasks:**
-        - Hierarchical Classification (3 levels)
-        - Rotation Prediction (4 angles)
+        **Cấu trúc phân cấp:**
+        - Level 1: Loại chính (2 classes)
+        - Level 2: Loại tài liệu (3 classes)
+        - Level 3_1: Hướng đọc (2 classes - chỉ Thông thường)
+        - Level 3_2: Loại ngoại cảnh (2 classes - chỉ Ngoại cảnh)
         
         **Loại chính:**
         - Ảnh Hán Nôm
@@ -735,18 +731,19 @@ def main():
         - Hành chính
         - Ngoại cảnh
         
-        **Hướng đọc:**
+        **Hướng đọc (Thông thường):**
         - Dọc
         - Ngang
         
-        **Góc xoay:**
-        - 0°, 90°, 180°, 270°
+        **Loại ngoại cảnh:**
+        - Bia
+        - Khác
         """)
         
         st.divider()
         
         st.write("**Developed by:** Hoang Phuc Nguyen")
-        st.write("**Model:** Multi-Task ResNet50 with CBAM")
+        st.write("**Model:** Hierarchical ResNet50 with CBAM")
 
 if __name__ == "__main__":
     main()
