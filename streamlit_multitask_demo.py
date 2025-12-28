@@ -2,19 +2,18 @@
 🏛️ Hán Nôm Hierarchical Classification Demo
 Streamlit Web Application for Hierarchical Classification
 
-✅ UPDATED: Architecture matches training notebook!
+✅ UPDATED: Architecture matches training notebook (han_nom_classification_dhc_2.ipynb)!
 
 This app demonstrates the HierarchicalResNet50 model with CBAM for:
-- Deep Hierarchical document classification (4 levels with feature concatenation)
+- Deep Hierarchical document classification (3 levels with feature concatenation)
 - Level 1: Main category (SinoNom/NonSinoNom)
-- Level 2: Document type (Thong_thuong/Hanh_chinh/Ngoai_canh)
-- Level 3_1: Text direction (Doc/Ngang) - Only for Thong_thuong
-- Level 3_2: Ngoai canh type (Bia/Other) - Only for Ngoai_canh
+- Level 2: Document type (general/admin/scene/epitaph) - 4 classes, only for SinoNom
+- Level 3: Text direction (vertical/horizontal) - only for general type
 
 Model: HierarchicalResNet50
 - Backbone: ResNet50 + CBAM attention
 - Image size: 128x128
-- Training: 4-output hierarchical model
+- Training: 3-output hierarchical model
 """
 import streamlit as st
 import torch
@@ -33,16 +32,17 @@ import torchvision.models as models
 warnings.filterwarnings('ignore')
 
 # ==================== CONSTANTS ====================
+# Level 1: SinoNom vs NonSinoNom
 MAIN_CATEGORIES = {"SinoNom": 0, "NonSinoNom": 1}
-DOC_TYPES = {"Thong_thuong": 0, "Hanh_chinh": 1, "Ngoai_canh": 2}
-TEXT_DIRECTIONS = {"Doc": 0, "Ngang": 1}
-NGOAI_CANH_TYPES = {"Bia": 0, "Other": 1}
+# Level 2: Document types (4 classes) - only for SinoNom
+DOC_TYPES = {"general": 0, "admin": 1, "scene": 2, "epitaph": 3}
+# Level 3: Text direction - only for general type
+TEXT_DIRECTIONS = {"vertical": 0, "horizontal": 1}
 
 # Reverse mappings for inference
 INV_MAIN_CATEGORIES = {v: k for k, v in MAIN_CATEGORIES.items()}
 INV_DOC_TYPES = {v: k for k, v in DOC_TYPES.items()}
 INV_TEXT_DIRECTIONS = {v: k for k, v in TEXT_DIRECTIONS.items()}
-INV_NGOAI_CANH_TYPES = {v: k for k, v in NGOAI_CANH_TYPES.items()}
 
 # Display mappings for Vietnamese text
 DISPLAY_MAIN_CATEGORIES = {
@@ -51,22 +51,18 @@ DISPLAY_MAIN_CATEGORIES = {
 }
 
 DISPLAY_DOC_TYPES = {
-    "Thong_thuong": "Thông thường",
-    "Hanh_chinh": "Hành chính", 
-    "Ngoai_canh": "Ngoại cảnh"
+    "general": "Thông thường",
+    "admin": "Hành chính", 
+    "scene": "Ngoại cảnh",
+    "epitaph": "Văn bia"
 }
 
 DISPLAY_TEXT_DIRECTIONS = {
-    "Doc": "Dọc",
-    "Ngang": "Ngang"
+    "vertical": "Dọc",
+    "horizontal": "Ngang"
 }
 
-DISPLAY_NGOAI_CANH_TYPES = {
-    "Bia": "Bia",
-    "Other": "Khác"
-}
-
-IMAGE_SIZE = (128, 128)  # ✅ UPDATED: 128x128 for conditional model (matches training)
+IMAGE_SIZE = (128, 128)  # ✅ UPDATED: 128x128 for hierarchical model (matches training)
 IMAGE_DEPTH = 3
 
 # ==================== MODEL ARCHITECTURE ====================
@@ -198,12 +194,13 @@ class HierarchicalResNet50(nn.Module):
     ResNet50 with CBAM + Deep Hierarchical Classification
     ✅ UPDATED: Architecture matches training notebook exactly!
     
-    Multi-task learning:
-    - Shared backbone for feature extraction
-    - Hierarchical classification head (4 outputs: main category, doc type, text direction, ngoai_canh type)
+    New structure:
+    - Level 1: SinoNom / NonSinoNom (2 classes)
+    - Level 2: general / admin / scene / epitaph (4 classes) - only for SinoNom
+    - Level 3: horizontal / vertical (2 classes) - only for general type
     """
     
-    def __init__(self, use_cbam=True, image_depth=3, num_classes=[2, 3, 2, 2]):
+    def __init__(self, use_cbam=True, image_depth=3, num_classes=[2, 4, 2]):
         super().__init__()
         self.expansion = 4
         self.use_cbam = use_cbam
@@ -233,7 +230,7 @@ class HierarchicalResNet50(nn.Module):
             nn.Dropout(0.5)
         )
         
-        # Level 2: Document type (depends on h1)
+        # Level 2: Document type - 4 classes (general/admin/scene/epitaph)
         self.h2_layer = nn.Sequential(
             nn.Linear(base_feature_dim + 512, 256),
             nn.BatchNorm1d(256),
@@ -241,16 +238,8 @@ class HierarchicalResNet50(nn.Module):
             nn.Dropout(0.4)
         )
         
-        # Level 3_thong_thuong: Text direction (depends on h1 + h2)
-        self.h3_1_layer = nn.Sequential(
-            nn.Linear(base_feature_dim + 512 + 256, 128),
-            nn.BatchNorm1d(128),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.3)
-        )
-
-        # Level 3_ngoai_canh: Ngoai canh type (depends on h1 + h2) 
-        self.h3_2_layer = nn.Sequential(
+        # Level 3: Text direction (only for general type) - horizontal/vertical
+        self.h3_layer = nn.Sequential(
             nn.Linear(base_feature_dim + 512 + 256, 128),
             nn.BatchNorm1d(128),
             nn.ReLU(inplace=True),
@@ -258,10 +247,9 @@ class HierarchicalResNet50(nn.Module):
         )
 
         # Classification heads
-        self.classifier1 = nn.Linear(512, num_classes[0])  # Main category
-        self.classifier2 = nn.Linear(256, num_classes[1])  # Document type
-        self.classifier3_1 = nn.Linear(128, num_classes[2])  # Text direction
-        self.classifier3_2 = nn.Linear(128, num_classes[3])  # Ngoai canh type
+        self.classifier1 = nn.Linear(512, num_classes[0])   # Main category (2)
+        self.classifier2 = nn.Linear(256, num_classes[1])   # Document type (4)
+        self.classifier3 = nn.Linear(128, num_classes[2])   # Text direction (2)
         
         self._initialize_weights()
     
@@ -308,22 +296,21 @@ class HierarchicalResNet50(nn.Module):
         base_features = torch.flatten(x, 1)  # [batch, 2048]
         
         # ==================== HIERARCHICAL CLASSIFICATION ====================
-        # Level 1
+        # Level 1: Main category (SinoNom/NonSinoNom)
         h1 = self.h1_layer(base_features)  # [batch, 512]
         out_main = self.classifier1(h1)
         
-        # Level 2
+        # Level 2: Document type (4 classes: general/admin/scene/epitaph)
         h2_input = torch.cat([base_features, h1], dim=1)
         h2 = self.h2_layer(h2_input)  # [batch, 256]
         out_doc = self.classifier2(h2)
         
-        # Level 3 (Text direction and Ngoai canh type)
+        # Level 3: Text direction (only for general type) - vertical/horizontal
         h3_input = torch.cat([base_features, h1, h2], dim=1)
-        h3 = self.h3_1_layer(h3_input)  # [batch, 128]
-        out_text = self.classifier3_1(h3)
-        out_ngoai_canh = self.classifier3_2(h3)
+        h3 = self.h3_layer(h3_input)  # [batch, 128]
+        out_text = self.classifier3(h3)
         
-        return [out_main, out_doc, out_text, out_ngoai_canh]
+        return [out_main, out_doc, out_text]
 
 # ==================== UTILITY FUNCTIONS ====================
 
@@ -331,11 +318,11 @@ class HierarchicalResNet50(nn.Module):
 def load_model():
     """Load the trained Multi-Task model from Kaggle."""
     try:
-        # Create model instance - UPDATED to use HierarchicalResNet50
+        # Create model instance - UPDATED to use HierarchicalResNet50 with 3 outputs
         model = HierarchicalResNet50(
             use_cbam=True,
             image_depth=IMAGE_DEPTH,
-            num_classes=[len(MAIN_CATEGORIES), len(DOC_TYPES), len(TEXT_DIRECTIONS), len(NGOAI_CANH_TYPES)]
+            num_classes=[len(MAIN_CATEGORIES), len(DOC_TYPES), len(TEXT_DIRECTIONS)]
         )
 
         load_resnet50_weights_to_custom(model)
@@ -433,61 +420,50 @@ def predict_image(model, image_tensor):
     """Make prediction on preprocessed image with multi-task model."""
     try:
         with torch.no_grad():
-            # Model returns list of 4 outputs
+            # Model returns list of 3 outputs
             hierarchical_outputs = model(image_tensor)
             
             # Unpack hierarchical outputs
-            out_main, out_doc, out_text, out_ngoai_canh = hierarchical_outputs
+            out_main, out_doc, out_text = hierarchical_outputs
             
             # Convert to probabilities
             prob_1 = F.softmax(out_main, dim=1)
             prob_2 = F.softmax(out_doc, dim=1)
             prob_3 = F.softmax(out_text, dim=1)
-            prob_4 = F.softmax(out_ngoai_canh, dim=1)
             
             # Get predicted classes
             pred_1 = prob_1.argmax(dim=1).item()
             pred_2 = prob_2.argmax(dim=1).item()
             pred_3 = prob_3.argmax(dim=1).item()
-            pred_4 = prob_4.argmax(dim=1).item()
             
             # Get confidence scores
             conf_1 = prob_1.max().item()
             conf_2 = prob_2.max().item()
             conf_3 = prob_3.max().item()
-            conf_4 = prob_4.max().item()
             
             # Apply hierarchical logic
             main_category = INV_MAIN_CATEGORIES[pred_1]
             
             if main_category == "SinoNom":
                 doc_type = INV_DOC_TYPES[pred_2]
-                if doc_type == "Thong_thuong":
+                if doc_type == "general":
+                    # Only general type has text direction
                     text_direction = INV_TEXT_DIRECTIONS[pred_3]
-                    ngoai_canh_type = "N/A"
-                    conf_4 = 0.0
-                elif doc_type == "Ngoai_canh":
+                else:
+                    # admin, scene, epitaph don't have text direction
                     text_direction = "N/A"
-                    ngoai_canh_type = INV_NGOAI_CANH_TYPES[pred_4]
                     conf_3 = 0.0
-                else:  # Hanh_chinh
-                    text_direction = "N/A"
-                    ngoai_canh_type = "N/A"
-                    conf_3 = 0.0
-                    conf_4 = 0.0
             else:
+                # NonSinoNom doesn't have doc type or text direction
                 doc_type = "N/A"
                 text_direction = "N/A"
-                ngoai_canh_type = "N/A"
                 conf_2 = 0.0
                 conf_3 = 0.0
-                conf_4 = 0.0
             
             # Convert to display names
             display_main_category = DISPLAY_MAIN_CATEGORIES.get(main_category, main_category)
             display_doc_type = DISPLAY_DOC_TYPES.get(doc_type, doc_type) if doc_type != "N/A" else "N/A"
             display_text_direction = DISPLAY_TEXT_DIRECTIONS.get(text_direction, text_direction) if text_direction != "N/A" else "N/A"
-            display_ngoai_canh_type = DISPLAY_NGOAI_CANH_TYPES.get(ngoai_canh_type, ngoai_canh_type) if ngoai_canh_type != "N/A" else "N/A"
             
             return {
                 'main_category': display_main_category,
@@ -496,13 +472,10 @@ def predict_image(model, image_tensor):
                 'document_type_confidence': conf_2,
                 'text_direction': display_text_direction,
                 'text_direction_confidence': conf_3,
-                'ngoai_canh_type': display_ngoai_canh_type,
-                'ngoai_canh_confidence': conf_4,
                 'raw_probabilities': {
                     'level_1': prob_1.squeeze().tolist(),
                     'level_2': prob_2.squeeze().tolist(),
-                    'level_3_1': prob_3.squeeze().tolist(),
-                    'level_3_2': prob_4.squeeze().tolist()
+                    'level_3': prob_3.squeeze().tolist()
                 }
             }
     except Exception as e:
@@ -572,7 +545,7 @@ def main():
     ### 🎯 Giới thiệu
     Ứng dụng này sử dụng mô hình **Hierarchical ResNet50 với CBAM** để thực hiện:
     - **Phân loại phân cấp** (Hierarchical Classification): Xác định loại tài liệu Hán Nôm
-    - **4 cấp độ**: Loại chính → Loại tài liệu → Hướng đọc (Thông thường) / Loại ngoại cảnh (Ngoại cảnh)
+    - **3 cấp độ**: Loại chính → Loại tài liệu (4 loại) → Hướng đọc (chỉ cho loại Thông thường)
     """)
     
     st.divider()
@@ -651,28 +624,13 @@ def main():
                             col_a, col_b = st.columns([3, 1])
                             with col_a:
                                 st.metric(
-                                    label="📐 Hướng đọc (Thông thường)",
+                                    label="📐 Hướng đọc (chỉ áp dụng cho Thông thường)",
                                     value=prediction['text_direction'],
                                     delta=f"Độ tin cậy: {prediction['text_direction_confidence']:.1%}" if prediction['text_direction'] != "N/A" else "Không áp dụng"
                                 )
                             with col_b:
                                 if prediction['text_direction'] != "N/A":
                                     st.progress(prediction['text_direction_confidence'])
-                                else:
-                                    st.write("—")
-                        
-                        # Ngoai Canh Type
-                        with st.container():
-                            col_a, col_b = st.columns([3, 1])
-                            with col_a:
-                                st.metric(
-                                    label="🏛️ Loại ngoại cảnh",
-                                    value=prediction['ngoai_canh_type'],
-                                    delta=f"Độ tin cậy: {prediction['ngoai_canh_confidence']:.1%}" if prediction['ngoai_canh_type'] != "N/A" else "Không áp dụng"
-                                )
-                            with col_b:
-                                if prediction['ngoai_canh_type'] != "N/A":
-                                    st.progress(prediction['ngoai_canh_confidence'])
                                 else:
                                     st.write("—")
                         
@@ -692,16 +650,10 @@ def main():
                                 display_name = DISPLAY_DOC_TYPES.get(name, name)
                                 st.write(f"- {display_name}: {prob:.3f}")
                             
-                            # Level 3_1
-                            st.write("**Hướng đọc (Thông thường):**")
-                            for i, (name, prob) in enumerate(zip(TEXT_DIRECTIONS.keys(), probs['level_3_1'])):
+                            # Level 3
+                            st.write("**Hướng đọc (chỉ cho Thông thường):**")
+                            for i, (name, prob) in enumerate(zip(TEXT_DIRECTIONS.keys(), probs['level_3'])):
                                 display_name = DISPLAY_TEXT_DIRECTIONS.get(name, name)
-                                st.write(f"- {display_name}: {prob:.3f}")
-                            
-                            # Level 3_2
-                            st.write("**Loại ngoại cảnh:**")
-                            for i, (name, prob) in enumerate(zip(NGOAI_CANH_TYPES.keys(), probs['level_3_2'])):
-                                display_name = DISPLAY_NGOAI_CANH_TYPES.get(name, name)
                                 st.write(f"- {display_name}: {prob:.3f}")
                     else:
                         st.error("❌ Không thể thực hiện phân loại")
@@ -718,26 +670,22 @@ def main():
         
         **Cấu trúc phân cấp:**
         - Level 1: Loại chính (2 classes)
-        - Level 2: Loại tài liệu (3 classes)
-        - Level 3_1: Hướng đọc (2 classes - chỉ Thông thường)
-        - Level 3_2: Loại ngoại cảnh (2 classes - chỉ Ngoại cảnh)
+        - Level 2: Loại tài liệu (4 classes - chỉ SinoNom)
+        - Level 3: Hướng đọc (2 classes - chỉ Thông thường)
         
         **Loại chính:**
-        - Ảnh Hán Nôm
-        - Ảnh không chứa chữ Hán Nôm
+        - Ảnh Hán Nôm (SinoNom)
+        - Ảnh không chứa chữ Hán Nôm (NonSinoNom)
         
-        **Loại tài liệu:**
-        - Thông thường
-        - Hành chính
-        - Ngoại cảnh
+        **Loại tài liệu (Level 2):**
+        - Thông thường (general)
+        - Hành chính (admin)
+        - Ngoại cảnh (scene)
+        - Văn bia (epitaph)
         
-        **Hướng đọc (Thông thường):**
-        - Dọc
-        - Ngang
-        
-        **Loại ngoại cảnh:**
-        - Bia
-        - Khác
+        **Hướng đọc (Level 3 - chỉ cho Thông thường):**
+        - Dọc (vertical)
+        - Ngang (horizontal)
         """)
         
         st.divider()
