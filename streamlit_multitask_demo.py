@@ -29,7 +29,7 @@ import kagglehub
 from typing import Dict, Tuple, List, Optional, Union
 import warnings
 import torchvision.models as models
-from paddleocr import PaddleOCR
+from paddlex import create_model
 warnings.filterwarnings('ignore')
 
 # ==================== CONSTANTS ====================
@@ -317,62 +317,102 @@ class HierarchicalResNet50(nn.Module):
 
 @st.cache_resource
 def load_orientation_detector():
-    """Load PaddleOCR orientation detector with PP-LCNet_x1_0_doc_ori model."""
+    """Load PaddleX orientation detector with PP-LCNet_x1_0_doc_ori model."""
     try:
-        ocr = PaddleOCR(
-            use_angle_cls=True,  # Enable orientation classification
-            lang='ch',  # Chinese language model (works for Han-Nom)
-            show_log=False,
-            use_gpu=False,
-            det=False,  # Disable text detection
-            rec=False,  # Disable text recognition
-            cls=True    # Only use classification/orientation
-        )
-        return ocr
+        model = create_model(model_name="PP-LCNet_x1_0_doc_ori")
+        return model
     except Exception as e:
         st.error(f"❌ Lỗi khi tải orientation detector: {str(e)}")
         return None
 
 def detect_image_rotation(image):
     """
-    Detect if image is rotated using PaddleOCR's orientation classifier.
+    Detect if image is rotated using PaddleX's PP-LCNet_x1_0_doc_ori model.
     Returns rotation angle (0, 90, 180, 270) and confidence score.
     """
     try:
-        # Initialize PaddleOCR if not already cached
-        ocr = load_orientation_detector()
-        if ocr is None:
-            return None, 0.0
+        # Initialize PaddleX model if not already cached
+        model = load_orientation_detector()
+        if model is None:
+            return {
+                'is_rotated': False,
+                'angle': 0,
+                'confidence': 0.0,
+                'status': 'Không thể tải model'
+            }
         
-        # Convert PIL Image to numpy array for PaddleOCR
-        if isinstance(image, Image.Image):
-            image_np = np.array(image)
-        else:
-            image_np = image
-        
-        # Convert RGB to BGR for OpenCV compatibility
-        if len(image_np.shape) == 3 and image_np.shape[2] == 3:
-            image_np = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
-        
-        # Use PaddleOCR angle classifier
-        result = ocr.ocr(image_np, det=False, rec=False, cls=True)
-        
-        if result and len(result) > 0:
-            # PaddleOCR returns angle and confidence
-            # Angle: 0 (no rotation), 180 (upside down)
-            # We'll interpret this as rotation detection
-            angle_info = result[0]
-            if angle_info:
-                angle = angle_info[0] if isinstance(angle_info, (list, tuple)) else 0
-                confidence = angle_info[1] if isinstance(angle_info, (list, tuple)) and len(angle_info) > 1 else 0.5
+        # Save PIL Image to temporary file for PaddleX
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_file:
+            temp_path = tmp_file.name
+            if isinstance(image, Image.Image):
+                # Convert RGBA to RGB if needed (JPEG doesn't support alpha channel)
+                if image.mode in ('RGBA', 'LA', 'P'):
+                    # Create white background
+                    if image.mode == 'P' and 'transparency' in image.info:
+                        image = image.convert('RGBA')
+                    
+                    if image.mode in ('RGBA', 'LA'):
+                        background = Image.new('RGB', image.size, (255, 255, 255))
+                        if image.mode == 'RGBA':
+                            background.paste(image, mask=image.split()[-1])
+                        else:
+                            background.paste(image, mask=image.split()[1])
+                        image = background
+                    else:
+                        image = image.convert('RGB')
+                elif image.mode != 'RGB':
+                    image = image.convert('RGB')
                 
-                rotation_status = {
-                    'is_rotated': angle != 0,
-                    'angle': int(angle) if angle else 0,
-                    'confidence': float(confidence),
-                    'status': 'Ảnh bị xoay' if angle != 0 else 'Ảnh không bị xoay'
-                }
-                return rotation_status
+                image.save(temp_path)
+            else:
+                # If numpy array, convert to PIL and save
+                img_pil = Image.fromarray(image)
+                if img_pil.mode != 'RGB':
+                    img_pil = img_pil.convert('RGB')
+                img_pil.save(temp_path)
+        
+        try:
+            # Use PaddleX model to predict
+            output = model.predict(temp_path, batch_size=1)
+            
+            # Parse results
+            for res in output:
+                result_json = res.json
+                
+                # Extract rotation information from JSON
+                # PP-LCNet_x1_0_doc_ori returns: {'res': {'input_path': ..., 'class_ids': [...], 'scores': [...], 'label_names': [...]}}
+                if 'res' in result_json:
+                    res_data = result_json['res']
+                    
+                    if 'class_ids' in res_data and 'scores' in res_data:
+                        class_id = res_data['class_ids'][0] if res_data['class_ids'] else 0
+                        score = res_data['scores'][0] if res_data['scores'] else 0.0
+                        
+                        # Map class_id to rotation angle
+                        # 0: 0°, 1: 90°, 2: 180°, 3: 270°
+                        angle_mapping = {0: 0, 1: 90, 2: 180, 3: 270}
+                        angle = angle_mapping.get(class_id, 0)
+                        
+                        rotation_status = {
+                            'is_rotated': angle != 0,
+                            'angle': angle,
+                            'confidence': float(score),
+                            'status': f'Ảnh bị xoay {angle}°' if angle != 0 else 'Ảnh không bị xoay'
+                        }
+                        
+                        # Clean up temp file
+                        os.unlink(temp_path)
+                        return rotation_status
+            
+            # Clean up temp file if no results
+            os.unlink(temp_path)
+            
+        except Exception as pred_error:
+            # Clean up temp file on error
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+            raise pred_error
         
         # Default: assume no rotation if detection fails
         return {
@@ -623,7 +663,7 @@ def main():
     Ứng dụng này sử dụng mô hình **Hierarchical ResNet50 với CBAM** để thực hiện:
     - **Phân loại phân cấp** (Hierarchical Classification): Xác định loại tài liệu Hán Nôm
     - **3 cấp độ**: Loại chính → Loại tài liệu (4 loại) → Hướng đọc (chỉ cho loại Thông thường)
-    - **Phát hiện xoay ảnh**: Sử dụng PaddleOCR với model PP-LCNet_x1_0_doc_ori
+    - **Phát hiện xoay ảnh**: Sử dụng PaddleX với model PP-LCNet_x1_0_doc_ori
     """)
     
     st.divider()
@@ -644,128 +684,181 @@ def main():
     )
     
     if uploaded_file is not None:
-        # Display image
-        col1, col2 = st.columns([1, 1])
+        # Load image
+        image = Image.open(uploaded_file)
         
-        with col1:
-            st.subheader("🖼️ Ảnh gốc")
-            image = Image.open(uploaded_file)
-            st.image(image, caption=f"File: {uploaded_file.name}", use_container_width=True)
-            
-            # Image info
-            st.write(f"**Kích thước:** {image.size}")
-            st.write(f"**Định dạng:** {image.format}")
-            st.write(f"**Mode:** {image.mode}")
-            
-            # Detect rotation with PaddleOCR
-            st.subheader("🔄 Phát hiện xoay ảnh")
-            with st.spinner("Đang phát hiện xoay ảnh với PaddleOCR..."):
-                rotation_info = detect_image_rotation(image)
-                
-                if rotation_info:
-                    # Display rotation status with visual indicator
-                    if rotation_info['is_rotated']:
-                        st.markdown(
-                            f"""
-                            <div class="rotation-indicator" style="background: linear-gradient(135deg, #FF6B6B 0%, #FF8E53 100%);">
-                                ⚠️ {rotation_info['status']}<br>
-                                Góc xoay: {rotation_info['angle']}°<br>
-                                Độ tin cậy: {rotation_info['confidence']:.1%}
-                            </div>
-                            """,
-                            unsafe_allow_html=True
-                        )
-                    else:
-                        st.markdown(
-                            f"""
-                            <div class="rotation-indicator" style="background: linear-gradient(135deg, #56ab2f 0%, #a8e063 100%);">
-                                ✅ {rotation_info['status']}<br>
-                                Độ tin cậy: {rotation_info['confidence']:.1%}
-                            </div>
-                            """,
-                            unsafe_allow_html=True
-                        )
+        # Step 1: Detect rotation first
+        st.header("🔄 Bước 1: Phát hiện xoay ảnh")
+        with st.spinner("Đang phát hiện xoay ảnh với PaddleX (PP-LCNet_x1_0_doc_ori)..."):
+            rotation_info = detect_image_rotation(image)
         
-        with col2:
-            st.subheader("🧠 Kết quả phân loại")
+        # Display rotation results
+        if rotation_info:
+            col_rot1, col_rot2 = st.columns([1, 1])
             
-            # Automatic prediction when image is uploaded
-            with st.spinner("Đang phân tích với Multi-Task Model..."):
-                # Preprocess image
-                image_tensor = preprocess_image(image)
+            with col_rot1:
+                # Display rotation status with visual indicator
+                if rotation_info['is_rotated']:
+                    st.markdown(
+                        f"""
+                        <div class="rotation-indicator" style="background: linear-gradient(135deg, #FF6B6B 0%, #FF8E53 100%);">
+                            ⚠️ {rotation_info['status']}<br>
+                            Góc xoay: {rotation_info['angle']}°<br>
+                            Độ tin cậy: {rotation_info['confidence']:.1%}
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+                else:
+                    st.markdown(
+                        f"""
+                        <div class="rotation-indicator" style="background: linear-gradient(135deg, #56ab2f 0%, #a8e063 100%);">
+                            ✅ {rotation_info['status']}<br>
+                            Độ tin cậy: {rotation_info['confidence']:.1%}
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+            
+            with col_rot2:
+                # Show rotation info
+                st.metric(
+                    label="Góc phát hiện",
+                    value=f"{rotation_info['angle']}°",
+                    delta=f"Tin cậy: {rotation_info['confidence']:.1%}"
+                )
+        
+        st.divider()
+        
+        # Step 2: Correct rotation if needed
+        corrected_image = image
+        if rotation_info and rotation_info['is_rotated']:
+            st.header("🔧 Bước 2: Điều chỉnh góc xoay")
+            
+            # Rotate image to correct orientation
+            # PIL rotate() uses counter-clockwise for positive angles
+            angle = rotation_info['angle']
+            if angle == 90:
+                # Image is rotated 90° clockwise, rotate back 90° counter-clockwise
+                corrected_image = image.rotate(90, expand=True)
+                rotation_applied = 90
+            elif angle == 180:
+                # Image is upside down, rotate 180°
+                corrected_image = image.rotate(180, expand=True)
+                rotation_applied = 180
+            elif angle == 270:
+                # Image is rotated 270° clockwise (or 90° counter-clockwise), rotate back
+                corrected_image = image.rotate(270, expand=True)
+                rotation_applied = 270
+            
+            # Display both images
+            col_before, col_after = st.columns([1, 1])
+            
+            with col_before:
+                st.subheader("🖼️ Ảnh gốc (bị xoay)")
+                st.image(image, caption=f"File: {uploaded_file.name}", use_container_width=True)
+                st.write(f"**Kích thước:** {image.size}")
+                st.write(f"**Định dạng:** {image.format}")
+                st.write(f"**Mode:** {image.mode}")
+            
+            with col_after:
+                st.subheader("✅ Ảnh đã điều chỉnh")
+                st.image(corrected_image, caption=f"Đã xoay {rotation_applied}° ngược chiều kim đồng hồ", use_container_width=True)
+                st.write(f"**Kích thước:** {corrected_image.size}")
+                st.write(f"**Đã điều chỉnh:** Xoay {-angle}°")
+            
+            st.success(f"✅ Đã điều chỉnh ảnh bị xoay {angle}° về chiều đúng!")
+        else:
+            st.header("🖼️ Ảnh gốc")
+            col_img, col_info = st.columns([2, 1])
+            
+            with col_img:
+                st.image(image, caption=f"File: {uploaded_file.name}", use_container_width=True)
+            
+            with col_info:
+                st.write("**Thông tin ảnh:**")
+                st.write(f"**Kích thước:** {image.size}")
+                st.write(f"**Định dạng:** {image.format}")
+                st.write(f"**Mode:** {image.mode}")
+                st.write(f"**Trạng thái:** Không cần điều chỉnh")
+        
+        st.divider()
+        
+        # Step 3: Classification with corrected image
+        st.header("🧠 Bước 3: Phân loại tài liệu")
+        
+        with st.spinner("Đang phân tích với Multi-Task Model..."):
+            # Use corrected image for classification
+            image_tensor = preprocess_image(corrected_image)
+            
+            if image_tensor is not None:
+                # Make prediction
+                prediction = predict_image(model, image_tensor)
                 
-                if image_tensor is not None:
-                    # Make prediction
-                    prediction = predict_image(model, image_tensor)
+                if prediction:
+                    # Display predictions in columns
+                    col_p1, col_p2, col_p3 = st.columns(3)
                     
-                    if prediction:
-                        # Main Category
-                        with st.container():
-                            col_a, col_b = st.columns([3, 1])
-                            with col_a:
-                                st.metric(
-                                    label="📊 Loại chính",
-                                    value=prediction['main_category'],
-                                    delta=f"Độ tin cậy: {prediction['main_category_confidence']:.1%}"
-                                )
-                            with col_b:
-                                st.progress(prediction['main_category_confidence'])
+                    # Main Category
+                    with col_p1:
+                        st.metric(
+                            label="📊 Loại chính",
+                            value=prediction['main_category'],
+                            delta=f"{prediction['main_category_confidence']:.1%}"
+                        )
+                        st.progress(prediction['main_category_confidence'])
+                    
+                    # Document Type  
+                    with col_p2:
+                        st.metric(
+                            label="📋 Loại tài liệu",
+                            value=prediction['document_type'],
+                            delta=f"{prediction['document_type_confidence']:.1%}" if prediction['document_type'] != "N/A" else "N/A"
+                        )
+                        if prediction['document_type'] != "N/A":
+                            st.progress(prediction['document_type_confidence'])
+                        else:
+                            st.write("—")
+                    
+                    # Text Direction
+                    with col_p3:
+                        st.metric(
+                            label="📐 Hướng đọc",
+                            value=prediction['text_direction'],
+                            delta=f"{prediction['text_direction_confidence']:.1%}" if prediction['text_direction'] != "N/A" else "N/A"
+                        )
+                        if prediction['text_direction'] != "N/A":
+                            st.progress(prediction['text_direction_confidence'])
+                        else:
+                            st.write("—")
+                    
+                    # Detailed probabilities
+                    with st.expander("📈 Chi tiết xác suất"):
+                        probs = prediction['raw_probabilities']
                         
-                        # Document Type  
-                        with st.container():
-                            col_a, col_b = st.columns([3, 1])
-                            with col_a:
-                                st.metric(
-                                    label="📋 Loại tài liệu",
-                                    value=prediction['document_type'],
-                                    delta=f"Độ tin cậy: {prediction['document_type_confidence']:.1%}" if prediction['document_type'] != "N/A" else "Không áp dụng"
-                                )
-                            with col_b:
-                                if prediction['document_type'] != "N/A":
-                                    st.progress(prediction['document_type_confidence'])
-                                else:
-                                    st.write("—")
+                        col_detail1, col_detail2, col_detail3 = st.columns(3)
                         
-                        # Text Direction
-                        with st.container():
-                            col_a, col_b = st.columns([3, 1])
-                            with col_a:
-                                st.metric(
-                                    label="📐 Hướng đọc (chỉ áp dụng cho Thông thường)",
-                                    value=prediction['text_direction'],
-                                    delta=f"Độ tin cậy: {prediction['text_direction_confidence']:.1%}" if prediction['text_direction'] != "N/A" else "Không áp dụng"
-                                )
-                            with col_b:
-                                if prediction['text_direction'] != "N/A":
-                                    st.progress(prediction['text_direction_confidence'])
-                                else:
-                                    st.write("—")
-                        
-                        # Detailed probabilities
-                        with st.expander("📈 Chi tiết xác suất"):
-                            probs = prediction['raw_probabilities']
-                            
-                            # Level 1
+                        with col_detail1:
                             st.write("**Loại chính:**")
                             for i, (name, prob) in enumerate(zip(MAIN_CATEGORIES.keys(), probs['level_1'])):
                                 display_name = DISPLAY_MAIN_CATEGORIES.get(name, name)
                                 st.write(f"- {display_name}: {prob:.3f}")
-                            
-                            # Level 2
+                        
+                        with col_detail2:
                             st.write("**Loại tài liệu:**")
                             for i, (name, prob) in enumerate(zip(DOC_TYPES.keys(), probs['level_2'])):
                                 display_name = DISPLAY_DOC_TYPES.get(name, name)
                                 st.write(f"- {display_name}: {prob:.3f}")
-                            
-                            # Level 3
-                            st.write("**Hướng đọc (chỉ cho Thông thường):**")
+                        
+                        with col_detail3:
+                            st.write("**Hướng đọc:**")
                             for i, (name, prob) in enumerate(zip(TEXT_DIRECTIONS.keys(), probs['level_3'])):
                                 display_name = DISPLAY_TEXT_DIRECTIONS.get(name, name)
                                 st.write(f"- {display_name}: {prob:.3f}")
-                    else:
-                        st.error("❌ Không thể thực hiện phân loại")
                 else:
-                    st.error("❌ Không thể tiền xử lý ảnh")
+                    st.error("❌ Không thể thực hiện phân loại")
+            else:
+                st.error("❌ Không thể tiền xử lý ảnh")
     
     # Sidebar information
     with st.sidebar:
@@ -775,7 +868,7 @@ def main():
         
         **Kích thước ảnh:** 128x128
         
-        **Phát hiện xoay:** PaddleOCR (PP-LCNet_x1_0_doc_ori)
+        **Phát hiện xoay:** PaddleX (PP-LCNet_x1_0_doc_ori)
         
         **Cấu trúc phân cấp:**
         - Level 1: Loại chính (2 classes)
@@ -801,7 +894,7 @@ def main():
         
         st.write("**Developed by:** Hoang Phuc Nguyen")
         st.write("**Model:** Hierarchical ResNet50 with CBAM")
-        st.write("**Rotation Detection:** PaddleOCR")
+        st.write("**Rotation Detection:** PaddleX (PP-LCNet_x1_0_doc_ori)")
 
 if __name__ == "__main__":
     main()
