@@ -29,6 +29,7 @@ import kagglehub
 from typing import Dict, Tuple, List, Optional, Union
 import warnings
 import torchvision.models as models
+from paddleocr import PaddleOCR
 warnings.filterwarnings('ignore')
 
 # ==================== CONSTANTS ====================
@@ -315,6 +316,82 @@ class HierarchicalResNet50(nn.Module):
 # ==================== UTILITY FUNCTIONS ====================
 
 @st.cache_resource
+def load_orientation_detector():
+    """Load PaddleOCR orientation detector with PP-LCNet_x1_0_doc_ori model."""
+    try:
+        ocr = PaddleOCR(
+            use_angle_cls=True,  # Enable orientation classification
+            lang='ch',  # Chinese language model (works for Han-Nom)
+            show_log=False,
+            use_gpu=False,
+            det=False,  # Disable text detection
+            rec=False,  # Disable text recognition
+            cls=True    # Only use classification/orientation
+        )
+        return ocr
+    except Exception as e:
+        st.error(f"❌ Lỗi khi tải orientation detector: {str(e)}")
+        return None
+
+def detect_image_rotation(image):
+    """
+    Detect if image is rotated using PaddleOCR's orientation classifier.
+    Returns rotation angle (0, 90, 180, 270) and confidence score.
+    """
+    try:
+        # Initialize PaddleOCR if not already cached
+        ocr = load_orientation_detector()
+        if ocr is None:
+            return None, 0.0
+        
+        # Convert PIL Image to numpy array for PaddleOCR
+        if isinstance(image, Image.Image):
+            image_np = np.array(image)
+        else:
+            image_np = image
+        
+        # Convert RGB to BGR for OpenCV compatibility
+        if len(image_np.shape) == 3 and image_np.shape[2] == 3:
+            image_np = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+        
+        # Use PaddleOCR angle classifier
+        result = ocr.ocr(image_np, det=False, rec=False, cls=True)
+        
+        if result and len(result) > 0:
+            # PaddleOCR returns angle and confidence
+            # Angle: 0 (no rotation), 180 (upside down)
+            # We'll interpret this as rotation detection
+            angle_info = result[0]
+            if angle_info:
+                angle = angle_info[0] if isinstance(angle_info, (list, tuple)) else 0
+                confidence = angle_info[1] if isinstance(angle_info, (list, tuple)) and len(angle_info) > 1 else 0.5
+                
+                rotation_status = {
+                    'is_rotated': angle != 0,
+                    'angle': int(angle) if angle else 0,
+                    'confidence': float(confidence),
+                    'status': 'Ảnh bị xoay' if angle != 0 else 'Ảnh không bị xoay'
+                }
+                return rotation_status
+        
+        # Default: assume no rotation if detection fails
+        return {
+            'is_rotated': False,
+            'angle': 0,
+            'confidence': 0.0,
+            'status': 'Không xác định được'
+        }
+        
+    except Exception as e:
+        st.warning(f"⚠️ Lỗi khi phát hiện xoay ảnh: {str(e)}")
+        return {
+            'is_rotated': False,
+            'angle': 0,
+            'confidence': 0.0,
+            'status': 'Lỗi phát hiện'
+        }
+
+@st.cache_resource
 def load_model():
     """Load the trained Multi-Task model from Kaggle."""
     try:
@@ -546,6 +623,7 @@ def main():
     Ứng dụng này sử dụng mô hình **Hierarchical ResNet50 với CBAM** để thực hiện:
     - **Phân loại phân cấp** (Hierarchical Classification): Xác định loại tài liệu Hán Nôm
     - **3 cấp độ**: Loại chính → Loại tài liệu (4 loại) → Hướng đọc (chỉ cho loại Thông thường)
+    - **Phát hiện xoay ảnh**: Sử dụng PaddleOCR với model PP-LCNet_x1_0_doc_ori
     """)
     
     st.divider()
@@ -578,6 +656,35 @@ def main():
             st.write(f"**Kích thước:** {image.size}")
             st.write(f"**Định dạng:** {image.format}")
             st.write(f"**Mode:** {image.mode}")
+            
+            # Detect rotation with PaddleOCR
+            st.subheader("🔄 Phát hiện xoay ảnh")
+            with st.spinner("Đang phát hiện xoay ảnh với PaddleOCR..."):
+                rotation_info = detect_image_rotation(image)
+                
+                if rotation_info:
+                    # Display rotation status with visual indicator
+                    if rotation_info['is_rotated']:
+                        st.markdown(
+                            f"""
+                            <div class="rotation-indicator" style="background: linear-gradient(135deg, #FF6B6B 0%, #FF8E53 100%);">
+                                ⚠️ {rotation_info['status']}<br>
+                                Góc xoay: {rotation_info['angle']}°<br>
+                                Độ tin cậy: {rotation_info['confidence']:.1%}
+                            </div>
+                            """,
+                            unsafe_allow_html=True
+                        )
+                    else:
+                        st.markdown(
+                            f"""
+                            <div class="rotation-indicator" style="background: linear-gradient(135deg, #56ab2f 0%, #a8e063 100%);">
+                                ✅ {rotation_info['status']}<br>
+                                Độ tin cậy: {rotation_info['confidence']:.1%}
+                            </div>
+                            """,
+                            unsafe_allow_html=True
+                        )
         
         with col2:
             st.subheader("🧠 Kết quả phân loại")
@@ -668,6 +775,8 @@ def main():
         
         **Kích thước ảnh:** 128x128
         
+        **Phát hiện xoay:** PaddleOCR (PP-LCNet_x1_0_doc_ori)
+        
         **Cấu trúc phân cấp:**
         - Level 1: Loại chính (2 classes)
         - Level 2: Loại tài liệu (4 classes - chỉ SinoNom)
@@ -692,6 +801,7 @@ def main():
         
         st.write("**Developed by:** Hoang Phuc Nguyen")
         st.write("**Model:** Hierarchical ResNet50 with CBAM")
+        st.write("**Rotation Detection:** PaddleOCR")
 
 if __name__ == "__main__":
     main()
