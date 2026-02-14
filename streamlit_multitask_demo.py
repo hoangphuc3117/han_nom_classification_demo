@@ -29,7 +29,8 @@ import kagglehub
 from typing import Dict, Tuple, List, Optional, Union
 import warnings
 import torchvision.models as models
-from paddlex import create_model
+import math
+import numpy as np
 warnings.filterwarnings('ignore')
 
 # ==================== CONSTANTS ====================
@@ -190,6 +191,199 @@ class BottleneckCBAM(nn.Module):
         return out
 
 
+# ==================== PP-LCNET FOR ROTATION DETECTION ====================
+
+# Helper function for PP-LCNet
+def make_divisible(v, divisor=8, min_value=None):
+    if min_value is None:
+        min_value = divisor
+    new_v = max(min_value, int(v + divisor / 2) // divisor * divisor)
+    if new_v < 0.9 * v:
+        new_v += divisor
+    return new_v
+
+# Network configuration for PP-LCNet
+NET_CONFIG = {
+    "blocks2": [[3, 16, 32, 1, False]],
+    "blocks3": [[3, 32, 64, 2, False], [3, 64, 64, 1, False]],
+    "blocks4": [[3, 64, 128, 2, False], [3, 128, 128, 1, False]],
+    "blocks5": [[3, 128, 256, 2, False], [5, 256, 256, 1, False], 
+                [5, 256, 256, 1, False], [5, 256, 256, 1, False], 
+                [5, 256, 256, 1, False], [5, 256, 256, 1, False]],
+    "blocks6": [[5, 256, 512, 2, True], [5, 512, 512, 1, True]],
+}
+
+class ConvBNLayer(nn.Module):
+    """Convolutional layer with Batch Normalization and Hardswish activation."""
+    def __init__(self, num_channels, filter_size, num_filters, stride, num_groups=1):
+        super().__init__()
+        self.conv = nn.Conv2d(
+            in_channels=num_channels,
+            out_channels=num_filters,
+            kernel_size=filter_size,
+            stride=stride,
+            padding=(filter_size - 1) // 2,
+            groups=num_groups,
+            bias=False
+        )
+        self.bn = nn.BatchNorm2d(num_filters)
+        self.hardswish = nn.Hardswish()
+    
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.bn(x)
+        x = self.hardswish(x)
+        return x
+
+class SEModule(nn.Module):
+    """Squeeze-and-Excitation module."""
+    def __init__(self, channel, reduction=4):
+        super().__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.conv1 = nn.Conv2d(channel, channel // reduction, kernel_size=1, stride=1, padding=0)
+        self.relu = nn.ReLU()
+        self.conv2 = nn.Conv2d(channel // reduction, channel, kernel_size=1, stride=1, padding=0)
+        self.hardsigmoid = nn.Hardsigmoid()
+    
+    def forward(self, x):
+        identity = x
+        x = self.avg_pool(x)
+        x = self.conv1(x)
+        x = self.relu(x)
+        x = self.conv2(x)
+        x = self.hardsigmoid(x)
+        x = identity * x
+        return x
+
+class DepthwiseSeparable(nn.Module):
+    """Depthwise Separable Convolution."""
+    def __init__(self, num_channels, num_filters, stride, dw_size=3, use_se=False):
+        super().__init__()
+        self.use_se = use_se
+        self.dw_conv = ConvBNLayer(
+            num_channels=num_channels,
+            num_filters=num_channels,
+            filter_size=dw_size,
+            stride=stride,
+            num_groups=num_channels,
+        )
+        if use_se:
+            self.se = SEModule(num_channels)
+        self.pw_conv = ConvBNLayer(
+            num_channels=num_channels,
+            filter_size=1,
+            num_filters=num_filters,
+            stride=1
+        )
+    
+    def forward(self, x):
+        x = self.dw_conv(x)
+        if self.use_se:
+            x = self.se(x)
+        x = self.pw_conv(x)
+        return x
+
+class PPLCNetDocOrientation(nn.Module):
+    """PP-LCNet model for document orientation detection (4 classes: 0°, 90°, 180°, 270°)."""
+    def __init__(self, in_channels=3, scale=1.0, class_dim=4):
+        super().__init__()
+        self.scale = scale
+        
+        # Conv1
+        self.conv1 = ConvBNLayer(
+            num_channels=in_channels,
+            filter_size=3,
+            num_filters=make_divisible(16 * scale),
+            stride=2,
+        )
+        
+        # Blocks 2-6
+        self.blocks2 = nn.Sequential(*[
+            DepthwiseSeparable(
+                num_channels=make_divisible(in_c * scale),
+                num_filters=make_divisible(out_c * scale),
+                dw_size=k,
+                stride=s,
+                use_se=se,
+            )
+            for k, in_c, out_c, s, se in NET_CONFIG["blocks2"]
+        ])
+        
+        self.blocks3 = nn.Sequential(*[
+            DepthwiseSeparable(
+                num_channels=make_divisible(in_c * scale),
+                num_filters=make_divisible(out_c * scale),
+                dw_size=k,
+                stride=s,
+                use_se=se,
+            )
+            for k, in_c, out_c, s, se in NET_CONFIG["blocks3"]
+        ])
+        
+        self.blocks4 = nn.Sequential(*[
+            DepthwiseSeparable(
+                num_channels=make_divisible(in_c * scale),
+                num_filters=make_divisible(out_c * scale),
+                dw_size=k,
+                stride=s,
+                use_se=se,
+            )
+            for k, in_c, out_c, s, se in NET_CONFIG["blocks4"]
+        ])
+        
+        self.blocks5 = nn.Sequential(*[
+            DepthwiseSeparable(
+                num_channels=make_divisible(in_c * scale),
+                num_filters=make_divisible(out_c * scale),
+                dw_size=k,
+                stride=s,
+                use_se=se,
+            )
+            for k, in_c, out_c, s, se in NET_CONFIG["blocks5"]
+        ])
+        
+        self.blocks6 = nn.Sequential(*[
+            DepthwiseSeparable(
+                num_channels=make_divisible(in_c * scale),
+                num_filters=make_divisible(out_c * scale),
+                dw_size=k,
+                stride=s,
+                use_se=se,
+            )
+            for k, in_c, out_c, s, se in NET_CONFIG["blocks6"]
+        ])
+        
+        # Last conv
+        last_conv_in = make_divisible(512 * scale)
+        last_conv_out = int(last_conv_in * 2.5)
+        self.last_conv = nn.Conv2d(
+            in_channels=last_conv_in,
+            out_channels=last_conv_out,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            bias=False
+        )
+        
+        # Classification head
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Linear(last_conv_out, class_dim)
+    
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.blocks2(x)
+        x = self.blocks3(x)
+        x = self.blocks4(x)
+        x = self.blocks5(x)
+        x = self.blocks6(x)
+        x = self.last_conv(x)
+        x = self.pool(x)
+        x = torch.flatten(x, 1)
+        x = self.fc(x)
+        return x
+
+# ==================== HIERARCHICAL RESNET50 ====================
+
 class HierarchicalResNet50(nn.Module):
     """
     ResNet50 with CBAM + Deep Hierarchical Classification
@@ -317,9 +511,39 @@ class HierarchicalResNet50(nn.Module):
 
 @st.cache_resource
 def load_orientation_detector():
-    """Load PaddleX orientation detector with PP-LCNet_x1_0_doc_ori model."""
+    """Load PyTorch PP-LCNet orientation detector from best_model.pth."""
     try:
-        model = create_model(model_name="PP-LCNet_x1_0_doc_ori")
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Create model instance
+        model = PPLCNetDocOrientation(in_channels=3, scale=1.0, class_dim=4)
+        
+        # Load and convert state dict from PaddlePaddle to PyTorch format
+        model_path = 'best_model.pth'
+        if not os.path.exists(model_path):
+            st.error(f"❌ Không tìm thấy file weights: {model_path}")
+            return None
+        
+        paddle_state_dict = torch.load(model_path, map_location=device)
+        
+        # Convert PaddlePaddle naming to PyTorch naming
+        pytorch_state_dict = {}
+        for key, value in paddle_state_dict.items():
+            new_key = key.replace('._mean', '.running_mean').replace('._variance', '.running_var')
+            
+            # Transpose fc layer weights (PaddlePaddle uses [out, in], PyTorch uses [in, out])
+            if 'fc.weight' in new_key:
+                value = value.t()
+            
+            pytorch_state_dict[new_key] = value
+        
+        # Load the converted state dict
+        model.load_state_dict(pytorch_state_dict)
+        
+        # Move to device and set to eval mode
+        model = model.to(device)
+        model.eval()
+        
         return model
     except Exception as e:
         st.error(f"❌ Lỗi khi tải orientation detector: {str(e)}")
@@ -327,11 +551,11 @@ def load_orientation_detector():
 
 def detect_image_rotation(image):
     """
-    Detect if image is rotated using PaddleX's PP-LCNet_x1_0_doc_ori model.
+    Detect if image is rotated using PyTorch PP-LCNet model (from best_model.pth).
     Returns rotation angle (0, 90, 180, 270) and confidence score.
     """
     try:
-        # Initialize PaddleX model if not already cached
+        # Initialize PyTorch model if not already cached
         model = load_orientation_detector()
         if model is None:
             return {
@@ -341,86 +565,64 @@ def detect_image_rotation(image):
                 'status': 'Không thể tải model'
             }
         
-        # Save PIL Image to temporary file for PaddleX
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_file:
-            temp_path = tmp_file.name
-            if isinstance(image, Image.Image):
-                # Convert RGBA to RGB if needed (JPEG doesn't support alpha channel)
-                if image.mode in ('RGBA', 'LA', 'P'):
-                    # Create white background
-                    if image.mode == 'P' and 'transparency' in image.info:
-                        image = image.convert('RGBA')
-                    
-                    if image.mode in ('RGBA', 'LA'):
-                        background = Image.new('RGB', image.size, (255, 255, 255))
-                        if image.mode == 'RGBA':
-                            background.paste(image, mask=image.split()[-1])
-                        else:
-                            background.paste(image, mask=image.split()[1])
-                        image = background
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Preprocess image
+        if isinstance(image, Image.Image):
+            # Convert to RGB if needed
+            if image.mode in ('RGBA', 'LA', 'P'):
+                # Create white background
+                if image.mode == 'P' and 'transparency' in image.info:
+                    image = image.convert('RGBA')
+                
+                if image.mode in ('RGBA', 'LA'):
+                    background = Image.new('RGB', image.size, (255, 255, 255))
+                    if image.mode == 'RGBA':
+                        background.paste(image, mask=image.split()[-1])
                     else:
-                        image = image.convert('RGB')
-                elif image.mode != 'RGB':
+                        background.paste(image, mask=image.split()[1])
+                    image = background
+                else:
                     image = image.convert('RGB')
-                
-                image.save(temp_path)
-            else:
-                # If numpy array, convert to PIL and save
-                img_pil = Image.fromarray(image)
-                if img_pil.mode != 'RGB':
-                    img_pil = img_pil.convert('RGB')
-                img_pil.save(temp_path)
+            elif image.mode != 'RGB':
+                image = image.convert('RGB')
+        else:
+            # If numpy array, convert to PIL
+            image = Image.fromarray(image)
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
         
-        try:
-            # Use PaddleX model to predict
-            output = model.predict(temp_path, batch_size=1)
-            
-            # Parse results
-            for res in output:
-                result_json = res.json
-                
-                # Extract rotation information from JSON
-                # PP-LCNet_x1_0_doc_ori returns: {'res': {'input_path': ..., 'class_ids': [...], 'scores': [...], 'label_names': [...]}}
-                if 'res' in result_json:
-                    res_data = result_json['res']
-                    
-                    if 'class_ids' in res_data and 'scores' in res_data:
-                        class_id = res_data['class_ids'][0] if res_data['class_ids'] else 0
-                        score = res_data['scores'][0] if res_data['scores'] else 0.0
-                        
-                        # Map class_id to rotation angle
-                        # 0: 0°, 1: 90°, 2: 180°, 3: 270°
-                        angle_mapping = {0: 0, 1: 90, 2: 180, 3: 270}
-                        angle = angle_mapping.get(class_id, 0)
-                        
-                        rotation_status = {
-                            'is_rotated': angle != 0,
-                            'angle': angle,
-                            'confidence': float(score),
-                            'status': f'Ảnh bị xoay {angle}°' if angle != 0 else 'Ảnh không bị xoay'
-                        }
-                        
-                        # Clean up temp file
-                        os.unlink(temp_path)
-                        return rotation_status
-            
-            # Clean up temp file if no results
-            os.unlink(temp_path)
-            
-        except Exception as pred_error:
-            # Clean up temp file on error
-            if os.path.exists(temp_path):
-                os.unlink(temp_path)
-            raise pred_error
+        # Apply transforms (same as in test_model.ipynb)
+        transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                               std=[0.229, 0.224, 0.225])
+        ])
         
-        # Default: assume no rotation if detection fails
-        return {
-            'is_rotated': False,
-            'angle': 0,
-            'confidence': 0.0,
-            'status': 'Không xác định được'
+        image_tensor = transform(image).unsqueeze(0).to(device)
+        
+        # Make prediction
+        with torch.no_grad():
+            output = model(image_tensor)
+            probabilities = F.softmax(output, dim=1)
+            confidence, predicted_class = torch.max(probabilities, 1)
+        
+        # Map class_id to rotation angle
+        # 0: 0°, 1: 90°, 2: 180°, 3: 270°
+        angle_mapping = {0: 0, 1: 90, 2: 180, 3: 270}
+        class_id = predicted_class.item()
+        angle = angle_mapping.get(class_id, 0)
+        score = confidence.item()
+        
+        rotation_status = {
+            'is_rotated': angle != 0,
+            'angle': angle,
+            'confidence': float(score),
+            'status': f'Ảnh bị xoay {angle}°' if angle != 0 else 'Ảnh không bị xoay'
         }
+        
+        return rotation_status
         
     except Exception as e:
         st.warning(f"⚠️ Lỗi khi phát hiện xoay ảnh: {str(e)}")
@@ -663,7 +865,7 @@ def main():
     Ứng dụng này sử dụng mô hình **Hierarchical ResNet50 với CBAM** để thực hiện:
     - **Phân loại phân cấp** (Hierarchical Classification): Xác định loại tài liệu Hán Nôm
     - **3 cấp độ**: Loại chính → Loại tài liệu (4 loại) → Hướng đọc (chỉ cho loại Thông thường)
-    - **Phát hiện xoay ảnh**: Sử dụng PaddleX với model PP-LCNet_x1_0_doc_ori
+    - **Phát hiện xoay ảnh**: Sử dụng PyTorch PP-LCNet (weights từ best_model.pth)
     """)
     
     st.divider()
@@ -689,7 +891,7 @@ def main():
         
         # Step 1: Detect rotation first
         st.header("🔄 Bước 1: Phát hiện xoay ảnh")
-        with st.spinner("Đang phát hiện xoay ảnh với PaddleX (PP-LCNet_x1_0_doc_ori)..."):
+        with st.spinner("Đang phát hiện xoay ảnh với PyTorch PP-LCNet (best_model.pth)..."):
             rotation_info = detect_image_rotation(image)
         
         # Display rotation results
@@ -868,7 +1070,7 @@ def main():
         
         **Kích thước ảnh:** 128x128
         
-        **Phát hiện xoay:** PaddleX (PP-LCNet_x1_0_doc_ori)
+        **Phát hiện xoay:** PyTorch PP-LCNet (best_model.pth)
         
         **Cấu trúc phân cấp:**
         - Level 1: Loại chính (2 classes)
@@ -894,7 +1096,7 @@ def main():
         
         st.write("**Developed by:** Hoang Phuc Nguyen")
         st.write("**Model:** Hierarchical ResNet50 with CBAM")
-        st.write("**Rotation Detection:** PaddleX (PP-LCNet_x1_0_doc_ori)")
+        st.write("**Rotation Detection:** PyTorch PP-LCNet (best_model.pth)")
 
 if __name__ == "__main__":
     main()
