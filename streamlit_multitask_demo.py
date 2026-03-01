@@ -30,7 +30,6 @@ from typing import Dict, Tuple, List, Optional, Union
 import warnings
 import torchvision.models as models
 import math
-import numpy as np
 warnings.filterwarnings('ignore')
 
 # ==================== CONSTANTS ====================
@@ -283,6 +282,106 @@ class DepthwiseSeparable(nn.Module):
         x = self.pw_conv(x)
         return x
 
+class PPLCNetMirrorDetector(nn.Module):
+    """PP-LCNet model for mirror detection (2 classes: Normal/Mirrored)."""
+    def __init__(self, in_channels=3, scale=1.0, class_dim=2):
+        super().__init__()
+        self.scale = scale
+        
+        # Conv1
+        self.conv1 = ConvBNLayer(
+            num_channels=in_channels,
+            filter_size=3,
+            num_filters=make_divisible(16 * scale),
+            stride=2,
+        )
+        
+        # Blocks 2-6
+        self.blocks2 = nn.Sequential(*[
+            DepthwiseSeparable(
+                num_channels=make_divisible(in_c * scale),
+                num_filters=make_divisible(out_c * scale),
+                dw_size=k,
+                stride=s,
+                use_se=se,
+            )
+            for k, in_c, out_c, s, se in NET_CONFIG["blocks2"]
+        ])
+        
+        self.blocks3 = nn.Sequential(*[
+            DepthwiseSeparable(
+                num_channels=make_divisible(in_c * scale),
+                num_filters=make_divisible(out_c * scale),
+                dw_size=k,
+                stride=s,
+                use_se=se,
+            )
+            for k, in_c, out_c, s, se in NET_CONFIG["blocks3"]
+        ])
+        
+        self.blocks4 = nn.Sequential(*[
+            DepthwiseSeparable(
+                num_channels=make_divisible(in_c * scale),
+                num_filters=make_divisible(out_c * scale),
+                dw_size=k,
+                stride=s,
+                use_se=se,
+            )
+            for k, in_c, out_c, s, se in NET_CONFIG["blocks4"]
+        ])
+        
+        self.blocks5 = nn.Sequential(*[
+            DepthwiseSeparable(
+                num_channels=make_divisible(in_c * scale),
+                num_filters=make_divisible(out_c * scale),
+                dw_size=k,
+                stride=s,
+                use_se=se,
+            )
+            for k, in_c, out_c, s, se in NET_CONFIG["blocks5"]
+        ])
+        
+        self.blocks6 = nn.Sequential(*[
+            DepthwiseSeparable(
+                num_channels=make_divisible(in_c * scale),
+                num_filters=make_divisible(out_c * scale),
+                dw_size=k,
+                stride=s,
+                use_se=se,
+            )
+            for k, in_c, out_c, s, se in NET_CONFIG["blocks6"]
+        ])
+        
+        # Last conv
+        last_conv_in = make_divisible(512 * scale)
+        last_conv_out = int(last_conv_in * 2.5)
+        self.last_conv = nn.Conv2d(
+            in_channels=last_conv_in,
+            out_channels=last_conv_out,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            bias=False
+        )
+        
+        # Classification head - Binary classification
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Linear(last_conv_out, class_dim)
+    
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.blocks2(x)
+        x = self.blocks3(x)
+        x = self.blocks4(x)
+        x = self.blocks5(x)
+        x = self.blocks6(x)
+        x = self.last_conv(x)
+        x = self.pool(x)
+        x = torch.flatten(x, 1)
+        x = self.fc(x)
+        return x
+
+
 class PPLCNetDocOrientation(nn.Module):
     """PP-LCNet model for document orientation detection (4 classes: 0°, 90°, 180°, 270°)."""
     def __init__(self, in_channels=3, scale=1.0, class_dim=4):
@@ -510,6 +609,47 @@ class HierarchicalResNet50(nn.Module):
 # ==================== UTILITY FUNCTIONS ====================
 
 @st.cache_resource
+def load_mirror_detector():
+    """Load PyTorch PP-LCNet mirror detector from best_mirror_detector.pth."""
+    try:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Create model instance
+        model = PPLCNetMirrorDetector(in_channels=3, scale=1.0, class_dim=2)
+        
+        # Load state dict
+        model_path = 'best_mirror_detector.pth'
+        if not os.path.exists(model_path):
+            st.warning(f"⚠️ Không tìm thấy file weights: {model_path}")
+            return None
+        
+        paddle_state_dict = torch.load(model_path, map_location=device)
+        
+        # Convert PaddlePaddle naming to PyTorch naming
+        pytorch_state_dict = {}
+        for key, value in paddle_state_dict.items():
+            new_key = key.replace('._mean', '.running_mean').replace('._variance', '.running_var')
+            
+            # Transpose fc layer weights (PaddlePaddle uses [out, in], PyTorch uses [in, out])
+            if 'fc.weight' in new_key:
+                value = value.t()
+            
+            pytorch_state_dict[new_key] = value
+        
+        # Load the converted state dict
+        model.load_state_dict(pytorch_state_dict)
+        
+        # Move to device and set to eval mode
+        model = model.to(device)
+        model.eval()
+        
+        return model
+    except Exception as e:
+        st.error(f"❌ Lỗi khi tải mirror detector: {str(e)}")
+        return None
+
+
+@st.cache_resource
 def load_orientation_detector():
     """Load PyTorch PP-LCNet orientation detector from best_model.pth."""
     try:
@@ -548,6 +688,86 @@ def load_orientation_detector():
     except Exception as e:
         st.error(f"❌ Lỗi khi tải orientation detector: {str(e)}")
         return None
+
+def detect_mirror(image):
+    """
+    Detect if image is mirrored (horizontal flip) using PyTorch PP-LCNet model.
+    Returns mirror status and confidence score.
+    """
+    try:
+        # Initialize PyTorch model if not already cached
+        model = load_mirror_detector()
+        if model is None:
+            return {
+                'is_mirrored': False,
+                'confidence': 0.0,
+                'status': 'Không thể tải model'
+            }
+        
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Preprocess image
+        if isinstance(image, Image.Image):
+            # Convert to RGB if needed
+            if image.mode in ('RGBA', 'LA', 'P'):
+                # Create white background
+                if image.mode == 'P' and 'transparency' in image.info:
+                    image = image.convert('RGBA')
+                
+                if image.mode in ('RGBA', 'LA'):
+                    background = Image.new('RGB', image.size, (255, 255, 255))
+                    if image.mode == 'RGBA':
+                        background.paste(image, mask=image.split()[-1])
+                    else:
+                        background.paste(image, mask=image.split()[1])
+                    image = background
+                else:
+                    image = image.convert('RGB')
+            elif image.mode != 'RGB':
+                image = image.convert('RGB')
+        else:
+            # If numpy array, convert to PIL
+            image = Image.fromarray(image)
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+        
+        # Apply transforms (same as training)
+        transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                               std=[0.229, 0.224, 0.225])
+        ])
+        
+        image_tensor = transform(image).unsqueeze(0).to(device)
+        
+        # Make prediction
+        with torch.no_grad():
+            output = model(image_tensor)
+            probabilities = F.softmax(output, dim=1)
+            confidence, predicted_class = torch.max(probabilities, 1)
+        
+        # Class 0: Normal, Class 1: Mirrored
+        class_id = predicted_class.item()
+        is_mirrored = (class_id == 1)
+        score = confidence.item()
+        
+        mirror_status = {
+            'is_mirrored': is_mirrored,
+            'confidence': float(score),
+            'status': 'Ảnh bị mirror (lật ngang)' if is_mirrored else 'Ảnh bình thường'
+        }
+        
+        return mirror_status
+        
+    except Exception as e:
+        st.warning(f"⚠️ Lỗi khi phát hiện mirror: {str(e)}")
+        return {
+            'is_mirrored': False,
+            'confidence': 0.0,
+            'status': 'Lỗi phát hiện'
+        }
+
 
 def detect_image_rotation(image):
     """
@@ -865,7 +1085,9 @@ def main():
     Ứng dụng này sử dụng mô hình **Hierarchical ResNet50 với CBAM** để thực hiện:
     - **Phân loại phân cấp** (Hierarchical Classification): Xác định loại tài liệu Hán Nôm
     - **3 cấp độ**: Loại chính → Loại tài liệu (4 loại) → Hướng đọc (chỉ cho loại Thông thường)
-    - **Phát hiện xoay ảnh**: Sử dụng PyTorch PP-LCNet (weights từ best_model.pth)
+    - **Two-Stage Detection Pipeline**:
+        - Stage 1: Phát hiện mirror (lật ngang) - PyTorch PP-LCNet (best_mirror_detector.pth)
+        - Stage 2: Phát hiện xoay ảnh - PyTorch PP-LCNet (best_model.pth)
     """)
     
     st.divider()
@@ -889,10 +1111,76 @@ def main():
         # Load image
         image = Image.open(uploaded_file)
         
-        # Step 1: Detect rotation first
-        st.header("🔄 Bước 1: Phát hiện xoay ảnh")
+        # Step 1: Detect mirror first
+        st.header("🪞 Bước 1: Phát hiện ảnh bị mirror")
+        with st.spinner("Đang phát hiện mirror với PyTorch PP-LCNet (best_mirror_detector.pth)..."):
+            mirror_info = detect_mirror(image)
+        
+        # Display mirror results
+        if mirror_info:
+            col_mir1, col_mir2 = st.columns([1, 1])
+            
+            with col_mir1:
+                # Display mirror status with visual indicator
+                if mirror_info['is_mirrored']:
+                    st.markdown(
+                        f"""
+                        <div class="rotation-indicator" style="background: linear-gradient(135deg, #FF6B6B 0%, #FF8E53 100%);">
+                            ⚠️ {mirror_info['status']}<br>
+                            Độ tin cậy: {mirror_info['confidence']:.1%}
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+                else:
+                    st.markdown(
+                        f"""
+                        <div class="rotation-indicator" style="background: linear-gradient(135deg, #56ab2f 0%, #a8e063 100%);">
+                            ✅ {mirror_info['status']}<br>
+                            Độ tin cậy: {mirror_info['confidence']:.1%}
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+            
+            with col_mir2:
+                # Show mirror info
+                st.metric(
+                    label="Trạng thái Mirror",
+                    value="Mirrored" if mirror_info['is_mirrored'] else "Normal",
+                    delta=f"Tin cậy: {mirror_info['confidence']:.1%}"
+                )
+        
+        st.divider()
+        
+        # Step 1.5: Un-flip if mirrored
+        unflipped_image = image
+        if mirror_info and mirror_info['is_mirrored']:
+            st.header("🔧 Bước 1.5: Điều chỉnh ảnh mirror")
+            
+            # Flip image horizontally to correct mirror
+            unflipped_image = image.transpose(Image.FLIP_LEFT_RIGHT)
+            
+            # Display both images
+            col_before_mirror, col_after_mirror = st.columns([1, 1])
+            
+            with col_before_mirror:
+                st.subheader("🖼️ Ảnh gốc (bị mirror)")
+                st.image(image, caption=f"File: {uploaded_file.name}", use_container_width=True)
+                st.write(f"**Kích thước:** {image.size}")
+            
+            with col_after_mirror:
+                st.subheader("✅ Ảnh đã điều chỉnh")
+                st.image(unflipped_image, caption="Đã un-flip (lật ngang)", use_container_width=True)
+                st.write(f"**Kích thước:** {unflipped_image.size}")
+            
+            st.success("✅ Đã điều chỉnh ảnh bị mirror về trạng thái bình thường!")
+            st.divider()
+        
+        # Step 2: Detect rotation (on un-flipped image)
+        st.header("🔄 Bước 2: Phát hiện xoay ảnh")
         with st.spinner("Đang phát hiện xoay ảnh với PyTorch PP-LCNet (best_model.pth)..."):
-            rotation_info = detect_image_rotation(image)
+            rotation_info = detect_image_rotation(unflipped_image)
         
         # Display rotation results
         if rotation_info:
@@ -932,36 +1220,36 @@ def main():
         
         st.divider()
         
-        # Step 2: Correct rotation if needed
-        corrected_image = image
+        # Step 3: Correct rotation if needed
+        corrected_image = unflipped_image
         if rotation_info and rotation_info['is_rotated']:
-            st.header("🔧 Bước 2: Điều chỉnh góc xoay")
+            st.header("🔧 Bước 3: Điều chỉnh góc xoay")
             
             # Rotate image to correct orientation
             # PIL rotate() uses counter-clockwise for positive angles
             angle = rotation_info['angle']
             if angle == 90:
                 # Image is rotated 90° clockwise, rotate back 90° counter-clockwise
-                corrected_image = image.rotate(90, expand=True)
+                corrected_image = unflipped_image.rotate(90, expand=True)
                 rotation_applied = 90
             elif angle == 180:
                 # Image is upside down, rotate 180°
-                corrected_image = image.rotate(180, expand=True)
+                corrected_image = unflipped_image.rotate(180, expand=True)
                 rotation_applied = 180
             elif angle == 270:
                 # Image is rotated 270° clockwise (or 90° counter-clockwise), rotate back
-                corrected_image = image.rotate(270, expand=True)
+                corrected_image = unflipped_image.rotate(270, expand=True)
                 rotation_applied = 270
             
             # Display both images
             col_before, col_after = st.columns([1, 1])
             
             with col_before:
-                st.subheader("🖼️ Ảnh gốc (bị xoay)")
-                st.image(image, caption=f"File: {uploaded_file.name}", use_container_width=True)
-                st.write(f"**Kích thước:** {image.size}")
-                st.write(f"**Định dạng:** {image.format}")
-                st.write(f"**Mode:** {image.mode}")
+                st.subheader("🖼️ Ảnh trước khi xoay")
+                st.image(unflipped_image, caption="Đã điều chỉnh mirror (nếu có)", use_container_width=True)
+                st.write(f"**Kích thước:** {unflipped_image.size}")
+                st.write(f"**Định dạng:** {unflipped_image.format}")
+                st.write(f"**Mode:** {unflipped_image.mode}")
             
             with col_after:
                 st.subheader("✅ Ảnh đã điều chỉnh")
@@ -971,23 +1259,27 @@ def main():
             
             st.success(f"✅ Đã điều chỉnh ảnh bị xoay {angle}° về chiều đúng!")
         else:
-            st.header("🖼️ Ảnh gốc")
+            st.header("🖼️ Ảnh đã điều chỉnh")
             col_img, col_info = st.columns([2, 1])
             
             with col_img:
-                st.image(image, caption=f"File: {uploaded_file.name}", use_container_width=True)
+                st.image(unflipped_image, caption=f"File: {uploaded_file.name}", use_container_width=True)
             
             with col_info:
                 st.write("**Thông tin ảnh:**")
-                st.write(f"**Kích thước:** {image.size}")
-                st.write(f"**Định dạng:** {image.format}")
-                st.write(f"**Mode:** {image.mode}")
-                st.write(f"**Trạng thái:** Không cần điều chỉnh")
+                st.write(f"**Kích thước:** {unflipped_image.size}")
+                st.write(f"**Định dạng:** {unflipped_image.format}")
+                st.write(f"**Mode:** {unflipped_image.mode}")
+                if mirror_info and mirror_info['is_mirrored']:
+                    st.write(f"**Đã điều chỉnh:** Un-flip mirror")
+                    st.write(f"**Trạng thái xoay:** Không cần điều chỉnh")
+                else:
+                    st.write(f"**Trạng thái:** Không cần điều chỉnh")
         
         st.divider()
         
-        # Step 3: Classification with corrected image
-        st.header("🧠 Bước 3: Phân loại tài liệu")
+        # Step 4: Classification with corrected image
+        st.header("🧠 Bước 4: Phân loại tài liệu")
         
         with st.spinner("Đang phân tích với Multi-Task Model..."):
             # Use corrected image for classification
@@ -1070,7 +1362,9 @@ def main():
         
         **Kích thước ảnh:** 128x128
         
-        **Phát hiện xoay:** PyTorch PP-LCNet (best_model.pth)
+        **Two-Stage Detection Pipeline:**
+        - Stage 1: Mirror detection (best_mirror_detector.pth)
+        - Stage 2: Rotation detection (best_model.pth)
         
         **Cấu trúc phân cấp:**
         - Level 1: Loại chính (2 classes)
@@ -1096,6 +1390,7 @@ def main():
         
         st.write("**Developed by:** Hoang Phuc Nguyen")
         st.write("**Model:** Hierarchical ResNet50 with CBAM")
+        st.write("**Mirror Detection:** PyTorch PP-LCNet (best_mirror_detector.pth)")
         st.write("**Rotation Detection:** PyTorch PP-LCNet (best_model.pth)")
 
 if __name__ == "__main__":
