@@ -1098,261 +1098,284 @@ def main():
         st.error("❌ Không thể tải mô hình. Vui lòng thử lại sau.")
         st.stop()
     
-    st.header("📤 Tải ảnh để phân loại")
-        
-    # File upload
-    uploaded_file = st.file_uploader(
-        "Chọn hình ảnh tài liệu Hán Nôm:",
-        type=['png', 'jpg', 'jpeg', 'tiff', 'bmp'],
-        help="Hỗ trợ các định dạng: PNG, JPG, JPEG, TIFF, BMP"
-    )
-    
-    if uploaded_file is not None:
-        # Load image
-        image = Image.open(uploaded_file)
-        
-        # Step 1: Detect mirror first
-        st.header("🪞 Bước 1: Phát hiện ảnh bị mirror")
-        with st.spinner("Đang phát hiện mirror với PyTorch PP-LCNet (best_mirror_detector.pth)..."):
-            mirror_info = detect_mirror(image)
-        
-        # Display mirror results
-        if mirror_info:
-            col_mir1, col_mir2 = st.columns([1, 1])
-            
-            with col_mir1:
-                # Display mirror status with visual indicator
-                if mirror_info['is_mirrored']:
-                    st.markdown(
-                        f"""
-                        <div class="rotation-indicator" style="background: linear-gradient(135deg, #FF6B6B 0%, #FF8E53 100%);">
-                            ⚠️ {mirror_info['status']}<br>
-                            Độ tin cậy: {mirror_info['confidence']:.1%}
-                        </div>
-                        """,
-                        unsafe_allow_html=True
-                    )
-                else:
-                    st.markdown(
-                        f"""
-                        <div class="rotation-indicator" style="background: linear-gradient(135deg, #56ab2f 0%, #a8e063 100%);">
-                            ✅ {mirror_info['status']}<br>
-                            Độ tin cậy: {mirror_info['confidence']:.1%}
-                        </div>
-                        """,
-                        unsafe_allow_html=True
-                    )
-            
-            with col_mir2:
-                # Show mirror info
-                st.metric(
-                    label="Trạng thái Mirror",
-                    value="Mirrored" if mirror_info['is_mirrored'] else "Normal",
-                    delta=f"Tin cậy: {mirror_info['confidence']:.1%}"
-                )
-        
-        st.divider()
-        
-        # Step 1.5: Un-flip if mirrored
-        unflipped_image = image
-        if mirror_info and mirror_info['is_mirrored']:
-            st.header("🔧 Bước 1.5: Điều chỉnh ảnh mirror")
-            
-            # Flip image horizontally to correct mirror
-            unflipped_image = image.transpose(Image.FLIP_LEFT_RIGHT)
-            
-            # Display both images
-            col_before_mirror, col_after_mirror = st.columns([1, 1])
-            
-            with col_before_mirror:
-                st.subheader("🖼️ Ảnh gốc (bị mirror)")
-                st.image(image, caption=f"File: {uploaded_file.name}", use_container_width=True)
-                st.write(f"**Kích thước:** {image.size}")
-            
-            with col_after_mirror:
-                st.subheader("✅ Ảnh đã điều chỉnh")
-                st.image(unflipped_image, caption="Đã un-flip (lật ngang)", use_container_width=True)
-                st.write(f"**Kích thước:** {unflipped_image.size}")
-            
-            st.success("✅ Đã điều chỉnh ảnh bị mirror về trạng thái bình thường!")
-            st.divider()
-        
-        # Step 2: Detect rotation (on un-flipped image)
-        st.header("🔄 Bước 2: Phát hiện xoay ảnh")
-        with st.spinner("Đang phát hiện xoay ảnh với PyTorch PP-LCNet (best_model.pth)..."):
-            rotation_info = detect_image_rotation(unflipped_image)
-        
-        # Display rotation results
-        if rotation_info:
-            col_rot1, col_rot2 = st.columns([1, 1])
-            
-            with col_rot1:
-                # Display rotation status with visual indicator
-                if rotation_info['is_rotated']:
-                    st.markdown(
-                        f"""
-                        <div class="rotation-indicator" style="background: linear-gradient(135deg, #FF6B6B 0%, #FF8E53 100%);">
-                            ⚠️ {rotation_info['status']}<br>
-                            Góc xoay: {rotation_info['angle']}°<br>
-                            Độ tin cậy: {rotation_info['confidence']:.1%}
-                        </div>
-                        """,
-                        unsafe_allow_html=True
-                    )
-                else:
-                    st.markdown(
-                        f"""
-                        <div class="rotation-indicator" style="background: linear-gradient(135deg, #56ab2f 0%, #a8e063 100%);">
-                            ✅ {rotation_info['status']}<br>
-                            Độ tin cậy: {rotation_info['confidence']:.1%}
-                        </div>
-                        """,
-                        unsafe_allow_html=True
-                    )
-            
-            with col_rot2:
-                # Show rotation info
-                st.metric(
-                    label="Góc phát hiện",
-                    value=f"{rotation_info['angle']}°",
-                    delta=f"Tin cậy: {rotation_info['confidence']:.1%}"
-                )
-        
-        st.divider()
-        
-        # Step 3: Correct rotation if needed
-        corrected_image = unflipped_image
-        if rotation_info and rotation_info['is_rotated']:
-            st.header("🔧 Bước 3: Điều chỉnh góc xoay")
-            
-            # Rotate image to correct orientation
-            # PIL rotate() uses counter-clockwise for positive angles
-            angle = rotation_info['angle']
-            if angle == 90:
-                # Image is rotated 90° clockwise, rotate back 90° counter-clockwise
-                corrected_image = unflipped_image.rotate(90, expand=True)
-                rotation_applied = 90
-            elif angle == 180:
-                # Image is upside down, rotate 180°
-                corrected_image = unflipped_image.rotate(180, expand=True)
-                rotation_applied = 180
-            elif angle == 270:
-                # Image is rotated 270° clockwise (or 90° counter-clockwise), rotate back
-                corrected_image = unflipped_image.rotate(270, expand=True)
-                rotation_applied = 270
-            
-            # Display both images
-            col_before, col_after = st.columns([1, 1])
-            
-            with col_before:
-                st.subheader("🖼️ Ảnh trước khi xoay")
-                st.image(unflipped_image, caption="Đã điều chỉnh mirror (nếu có)", use_container_width=True)
-                st.write(f"**Kích thước:** {unflipped_image.size}")
-                st.write(f"**Định dạng:** {unflipped_image.format}")
-                st.write(f"**Mode:** {unflipped_image.mode}")
-            
-            with col_after:
-                st.subheader("✅ Ảnh đã điều chỉnh")
-                st.image(corrected_image, caption=f"Đã xoay {rotation_applied}° ngược chiều kim đồng hồ", use_container_width=True)
-                st.write(f"**Kích thước:** {corrected_image.size}")
-                st.write(f"**Đã điều chỉnh:** Xoay {-angle}°")
-            
-            st.success(f"✅ Đã điều chỉnh ảnh bị xoay {angle}° về chiều đúng!")
-        else:
-            st.header("🖼️ Ảnh đã điều chỉnh")
-            col_img, col_info = st.columns([2, 1])
-            
-            with col_img:
-                st.image(unflipped_image, caption=f"File: {uploaded_file.name}", use_container_width=True)
-            
-            with col_info:
+    st.header("📤 Tải ảnh theo tab chức năng")
+
+    tab_doc, tab_mirror, tab_rotate = st.tabs([
+        "📄 Document Type Detection",
+        "🪞 Mirror Detection",
+        "🔄 Rotation Detection"
+    ])
+
+    with tab_doc:
+        st.header("🧠 Phân loại tài liệu")
+        uploaded_file_doc = st.file_uploader(
+            "Chọn hình ảnh để phân loại:",
+            type=['png', 'jpg', 'jpeg', 'tiff', 'bmp'],
+            help="Hỗ trợ các định dạng: PNG, JPG, JPEG, TIFF, BMP",
+            key="uploader_doc"
+        )
+
+        if uploaded_file_doc is not None:
+            image = Image.open(uploaded_file_doc)
+
+            with st.spinner("Đang phát hiện mirror với PyTorch PP-LCNet (best_mirror_detector.pth)..."):
+                mirror_info = detect_mirror(image)
+
+            unflipped_image = image
+            if mirror_info and mirror_info['is_mirrored']:
+                unflipped_image = image.transpose(Image.FLIP_LEFT_RIGHT)
+
+            with st.spinner("Đang phát hiện xoay ảnh với PyTorch PP-LCNet (best_model.pth)..."):
+                rotation_info = detect_image_rotation(unflipped_image)
+
+            corrected_image = unflipped_image
+            if rotation_info and rotation_info['is_rotated']:
+                angle = rotation_info['angle']
+                if angle == 90:
+                    corrected_image = unflipped_image.rotate(90, expand=True)
+                elif angle == 180:
+                    corrected_image = unflipped_image.rotate(180, expand=True)
+                elif angle == 270:
+                    corrected_image = unflipped_image.rotate(270, expand=True)
+
+            col_img_doc, col_info_doc = st.columns([2, 1])
+            with col_img_doc:
+                st.image(corrected_image, caption="Ảnh dùng để phân loại (sau khi điều chỉnh)", use_container_width=True)
+            with col_info_doc:
                 st.write("**Thông tin ảnh:**")
-                st.write(f"**Kích thước:** {unflipped_image.size}")
-                st.write(f"**Định dạng:** {unflipped_image.format}")
-                st.write(f"**Mode:** {unflipped_image.mode}")
-                if mirror_info and mirror_info['is_mirrored']:
-                    st.write(f"**Đã điều chỉnh:** Un-flip mirror")
-                    st.write(f"**Trạng thái xoay:** Không cần điều chỉnh")
+                st.write(f"**Kích thước:** {corrected_image.size}")
+                st.write(f"**Mode:** {corrected_image.mode}")
+                st.write(f"**Mirror:** {'Đã điều chỉnh' if mirror_info and mirror_info['is_mirrored'] else 'Không cần điều chỉnh'}")
+                st.write(f"**Rotation:** {'Đã điều chỉnh' if rotation_info and rotation_info['is_rotated'] else 'Không cần điều chỉnh'}")
+
+            with st.spinner("Đang phân tích với Multi-Task Model..."):
+                image_tensor = preprocess_image(corrected_image)
+
+                if image_tensor is not None:
+                    prediction = predict_image(model, image_tensor)
+
+                    if prediction:
+                        col_p1, col_p2, col_p3 = st.columns(3)
+
+                        with col_p1:
+                            st.metric(
+                                label="📊 Loại chính",
+                                value=prediction['main_category'],
+                                delta=f"{prediction['main_category_confidence']:.1%}"
+                            )
+                            st.progress(prediction['main_category_confidence'])
+
+                        with col_p2:
+                            st.metric(
+                                label="📋 Loại tài liệu",
+                                value=prediction['document_type'],
+                                delta=f"{prediction['document_type_confidence']:.1%}" if prediction['document_type'] != "N/A" else "N/A"
+                            )
+                            if prediction['document_type'] != "N/A":
+                                st.progress(prediction['document_type_confidence'])
+                            else:
+                                st.write("—")
+
+                        with col_p3:
+                            st.metric(
+                                label="📐 Hướng đọc",
+                                value=prediction['text_direction'],
+                                delta=f"{prediction['text_direction_confidence']:.1%}" if prediction['text_direction'] != "N/A" else "N/A"
+                            )
+                            if prediction['text_direction'] != "N/A":
+                                st.progress(prediction['text_direction_confidence'])
+                            else:
+                                st.write("—")
+
+                        with st.expander("📈 Chi tiết xác suất"):
+                            probs = prediction['raw_probabilities']
+
+                            col_detail1, col_detail2, col_detail3 = st.columns(3)
+
+                            with col_detail1:
+                                st.write("**Loại chính:**")
+                                for i, (name, prob) in enumerate(zip(MAIN_CATEGORIES.keys(), probs['level_1'])):
+                                    display_name = DISPLAY_MAIN_CATEGORIES.get(name, name)
+                                    st.write(f"- {display_name}: {prob:.3f}")
+
+                            with col_detail2:
+                                st.write("**Loại tài liệu:**")
+                                for i, (name, prob) in enumerate(zip(DOC_TYPES.keys(), probs['level_2'])):
+                                    display_name = DISPLAY_DOC_TYPES.get(name, name)
+                                    st.write(f"- {display_name}: {prob:.3f}")
+
+                            with col_detail3:
+                                st.write("**Hướng đọc:**")
+                                for i, (name, prob) in enumerate(zip(TEXT_DIRECTIONS.keys(), probs['level_3'])):
+                                    display_name = DISPLAY_TEXT_DIRECTIONS.get(name, name)
+                                    st.write(f"- {display_name}: {prob:.3f}")
+                    else:
+                        st.error("❌ Không thể thực hiện phân loại")
                 else:
-                    st.write(f"**Trạng thái:** Không cần điều chỉnh")
-        
-        st.divider()
-        
-        # Step 4: Classification with corrected image
-        st.header("🧠 Bước 4: Phân loại tài liệu")
-        
-        with st.spinner("Đang phân tích với Multi-Task Model..."):
-            # Use corrected image for classification
-            image_tensor = preprocess_image(corrected_image)
-            
-            if image_tensor is not None:
-                # Make prediction
-                prediction = predict_image(model, image_tensor)
-                
-                if prediction:
-                    # Display predictions in columns
-                    col_p1, col_p2, col_p3 = st.columns(3)
-                    
-                    # Main Category
-                    with col_p1:
-                        st.metric(
-                            label="📊 Loại chính",
-                            value=prediction['main_category'],
-                            delta=f"{prediction['main_category_confidence']:.1%}"
+                    st.error("❌ Không thể tiền xử lý ảnh")
+        else:
+            st.info("Vui lòng tải ảnh trong tab này để phân loại tài liệu.")
+
+    with tab_mirror:
+        st.header("🪞 Phát hiện ảnh bị mirror")
+        uploaded_file_mirror = st.file_uploader(
+            "Chọn hình ảnh để phát hiện mirror:",
+            type=['png', 'jpg', 'jpeg', 'tiff', 'bmp'],
+            help="Hỗ trợ các định dạng: PNG, JPG, JPEG, TIFF, BMP",
+            key="uploader_mirror"
+        )
+
+        if uploaded_file_mirror is not None:
+            image = Image.open(uploaded_file_mirror)
+
+            with st.spinner("Đang phát hiện mirror với PyTorch PP-LCNet (best_mirror_detector.pth)..."):
+                mirror_info = detect_mirror(image)
+
+            if mirror_info:
+                col_mir1, col_mir2 = st.columns([1, 1])
+
+                with col_mir1:
+                    if mirror_info['is_mirrored']:
+                        st.markdown(
+                            f"""
+                            <div class="rotation-indicator" style="background: linear-gradient(135deg, #FF6B6B 0%, #FF8E53 100%);">
+                                ⚠️ {mirror_info['status']}<br>
+                                Độ tin cậy: {mirror_info['confidence']:.1%}
+                            </div>
+                            """,
+                            unsafe_allow_html=True
                         )
-                        st.progress(prediction['main_category_confidence'])
-                    
-                    # Document Type  
-                    with col_p2:
-                        st.metric(
-                            label="📋 Loại tài liệu",
-                            value=prediction['document_type'],
-                            delta=f"{prediction['document_type_confidence']:.1%}" if prediction['document_type'] != "N/A" else "N/A"
+                    else:
+                        st.markdown(
+                            f"""
+                            <div class="rotation-indicator" style="background: linear-gradient(135deg, #56ab2f 0%, #a8e063 100%);">
+                                ✅ {mirror_info['status']}<br>
+                                Độ tin cậy: {mirror_info['confidence']:.1%}
+                            </div>
+                            """,
+                            unsafe_allow_html=True
                         )
-                        if prediction['document_type'] != "N/A":
-                            st.progress(prediction['document_type_confidence'])
-                        else:
-                            st.write("—")
-                    
-                    # Text Direction
-                    with col_p3:
-                        st.metric(
-                            label="📐 Hướng đọc",
-                            value=prediction['text_direction'],
-                            delta=f"{prediction['text_direction_confidence']:.1%}" if prediction['text_direction'] != "N/A" else "N/A"
-                        )
-                        if prediction['text_direction'] != "N/A":
-                            st.progress(prediction['text_direction_confidence'])
-                        else:
-                            st.write("—")
-                    
-                    # Detailed probabilities
-                    with st.expander("📈 Chi tiết xác suất"):
-                        probs = prediction['raw_probabilities']
-                        
-                        col_detail1, col_detail2, col_detail3 = st.columns(3)
-                        
-                        with col_detail1:
-                            st.write("**Loại chính:**")
-                            for i, (name, prob) in enumerate(zip(MAIN_CATEGORIES.keys(), probs['level_1'])):
-                                display_name = DISPLAY_MAIN_CATEGORIES.get(name, name)
-                                st.write(f"- {display_name}: {prob:.3f}")
-                        
-                        with col_detail2:
-                            st.write("**Loại tài liệu:**")
-                            for i, (name, prob) in enumerate(zip(DOC_TYPES.keys(), probs['level_2'])):
-                                display_name = DISPLAY_DOC_TYPES.get(name, name)
-                                st.write(f"- {display_name}: {prob:.3f}")
-                        
-                        with col_detail3:
-                            st.write("**Hướng đọc:**")
-                            for i, (name, prob) in enumerate(zip(TEXT_DIRECTIONS.keys(), probs['level_3'])):
-                                display_name = DISPLAY_TEXT_DIRECTIONS.get(name, name)
-                                st.write(f"- {display_name}: {prob:.3f}")
-                else:
-                    st.error("❌ Không thể thực hiện phân loại")
+
+                with col_mir2:
+                    st.metric(
+                        label="Trạng thái Mirror",
+                        value="Mirrored" if mirror_info['is_mirrored'] else "Normal",
+                        delta=f"Tin cậy: {mirror_info['confidence']:.1%}"
+                    )
+
+            if mirror_info and mirror_info['is_mirrored']:
+                unflipped_image = image.transpose(Image.FLIP_LEFT_RIGHT)
+                st.header("🔧 Điều chỉnh ảnh mirror")
+                col_before_mirror, col_after_mirror = st.columns([1, 1])
+
+                with col_before_mirror:
+                    st.subheader("🖼️ Ảnh gốc (bị mirror)")
+                    st.image(image, caption=f"File: {uploaded_file_mirror.name}", use_container_width=True)
+                    st.write(f"**Kích thước:** {image.size}")
+
+                with col_after_mirror:
+                    st.subheader("✅ Ảnh đã điều chỉnh")
+                    st.image(unflipped_image, caption="Đã un-flip (lật ngang)", use_container_width=True)
+                    st.write(f"**Kích thước:** {unflipped_image.size}")
+
+                st.success("✅ Đã điều chỉnh ảnh bị mirror về trạng thái bình thường!")
             else:
-                st.error("❌ Không thể tiền xử lý ảnh")
+                st.info("Ảnh không bị mirror, không cần điều chỉnh lật ngang.")
+        else:
+            st.info("Vui lòng tải ảnh trong tab này để phát hiện mirror.")
+
+    with tab_rotate:
+        st.header("🔄 Phát hiện xoay ảnh")
+        uploaded_file_rotate = st.file_uploader(
+            "Chọn hình ảnh để phát hiện xoay:",
+            type=['png', 'jpg', 'jpeg', 'tiff', 'bmp'],
+            help="Hỗ trợ các định dạng: PNG, JPG, JPEG, TIFF, BMP",
+            key="uploader_rotate"
+        )
+
+        if uploaded_file_rotate is not None:
+            image = Image.open(uploaded_file_rotate)
+
+            # Keep the same preprocessing logic as pipeline: unflip first if mirrored.
+            with st.spinner("Đang kiểm tra mirror để tối ưu phát hiện xoay..."):
+                mirror_info = detect_mirror(image)
+
+            unflipped_image = image
+            if mirror_info and mirror_info['is_mirrored']:
+                unflipped_image = image.transpose(Image.FLIP_LEFT_RIGHT)
+                st.info("Ảnh được un-flip trước khi phát hiện xoay.")
+
+            with st.spinner("Đang phát hiện xoay ảnh với PyTorch PP-LCNet (best_model.pth)..."):
+                rotation_info = detect_image_rotation(unflipped_image)
+
+            corrected_image = unflipped_image
+            rotation_applied = 0
+            if rotation_info and rotation_info['is_rotated']:
+                angle = rotation_info['angle']
+                if angle == 90:
+                    corrected_image = unflipped_image.rotate(90, expand=True)
+                    rotation_applied = 90
+                elif angle == 180:
+                    corrected_image = unflipped_image.rotate(180, expand=True)
+                    rotation_applied = 180
+                elif angle == 270:
+                    corrected_image = unflipped_image.rotate(270, expand=True)
+                    rotation_applied = 270
+
+            if rotation_info:
+                col_rot1, col_rot2 = st.columns([1, 1])
+
+                with col_rot1:
+                    if rotation_info['is_rotated']:
+                        st.markdown(
+                            f"""
+                            <div class="rotation-indicator" style="background: linear-gradient(135deg, #FF6B6B 0%, #FF8E53 100%);">
+                                ⚠️ {rotation_info['status']}<br>
+                                Góc xoay: {rotation_info['angle']}°<br>
+                                Độ tin cậy: {rotation_info['confidence']:.1%}
+                            </div>
+                            """,
+                            unsafe_allow_html=True
+                        )
+                    else:
+                        st.markdown(
+                            f"""
+                            <div class="rotation-indicator" style="background: linear-gradient(135deg, #56ab2f 0%, #a8e063 100%);">
+                                ✅ {rotation_info['status']}<br>
+                                Độ tin cậy: {rotation_info['confidence']:.1%}
+                            </div>
+                            """,
+                            unsafe_allow_html=True
+                        )
+
+                with col_rot2:
+                    st.metric(
+                        label="Góc phát hiện",
+                        value=f"{rotation_info['angle']}°",
+                        delta=f"Tin cậy: {rotation_info['confidence']:.1%}"
+                    )
+
+            if rotation_info and rotation_info['is_rotated']:
+                st.header("🔧 Điều chỉnh góc xoay")
+                col_before, col_after = st.columns([1, 1])
+
+                with col_before:
+                    st.subheader("🖼️ Ảnh trước khi xoay")
+                    st.image(unflipped_image, caption="Ảnh đầu vào cho bước xoay", use_container_width=True)
+                    st.write(f"**Kích thước:** {unflipped_image.size}")
+                    st.write(f"**Mode:** {unflipped_image.mode}")
+
+                with col_after:
+                    st.subheader("✅ Ảnh đã điều chỉnh")
+                    st.image(corrected_image, caption=f"Đã xoay {rotation_applied}° ngược chiều kim đồng hồ", use_container_width=True)
+                    st.write(f"**Kích thước:** {corrected_image.size}")
+                    st.write(f"**Đã điều chỉnh:** Xoay {-rotation_info['angle']}°")
+
+                st.success(f"✅ Đã điều chỉnh ảnh bị xoay {rotation_info['angle']}° về chiều đúng!")
+            else:
+                st.info("Ảnh không bị xoay, không cần điều chỉnh góc.")
+        else:
+            st.info("Vui lòng tải ảnh trong tab này để phát hiện xoay.")
     
     # Sidebar information
     with st.sidebar:
