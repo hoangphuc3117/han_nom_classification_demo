@@ -1079,17 +1079,6 @@ def main():
     # Main header
     st.markdown('<h1 class="main-header">🏛️ Hán Nôm Hierarchical Classification Demo</h1>', unsafe_allow_html=True)
     
-    # Description
-    st.markdown("""
-    ### 🎯 Giới thiệu
-    Ứng dụng này sử dụng mô hình **Hierarchical ResNet50 với CBAM** để thực hiện:
-    - **Phân loại phân cấp** (Hierarchical Classification): Xác định loại tài liệu Hán Nôm
-    - **3 cấp độ**: Loại chính → Loại tài liệu (4 loại) → Hướng đọc (chỉ cho loại Thông thường)
-    - **Two-Stage Detection Pipeline**:
-        - Stage 1: Phát hiện mirror (lật ngang) - PyTorch PP-LCNet (best_mirror_detector.pth)
-        - Stage 2: Phát hiện xoay ảnh - PyTorch PP-LCNet (best_model.pth)
-    """)
-    
     st.divider()
     
     model = load_model()
